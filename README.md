@@ -1,6 +1,8 @@
 <!-- swarms/agents/cr_ca_agent.py — CRCAAgent (CR‑CA Lite) -->
 # CRCAAgent 
 
+Release: v1.1.0 — production hardening (thread-safe cache, CI sanity workflow, pytest smoke tests)
+
 Short summary
 -------------
 CRCAAgent is a lightweight causal reasoning Agent with LLM integration,
@@ -22,7 +24,16 @@ Canonical import
 Use the canonical agent import in application code:
 
 ```python
-from path.to.crca_agent import CRCAAgent
+from path.to.crca import CRCAAgent
+```
+```python
+from path.to.crca import CRCAAgent
+```
+```python
+from path.to.crca import CRCAAgent
+```
+```python
+from path.to.crca import CRCAAgent
 ```
 
 Quickstart
@@ -30,7 +41,7 @@ Quickstart
 Minimal example — deterministic mode: initialize, add edges, evolve state and get counterfactuals:
 
 ```python
-from path.to.crca_agent import CRCAAgent
+from path.to.crca import CRCAAgent
 
 agent = CRCAAgent(variables=["price", "demand", "inventory"])
 agent.add_causal_relationship("price", "demand", strength=-0.5)
@@ -48,7 +59,7 @@ LLM-based causal analysis example
 ----------------------------------
 
 ```python
-from path.to.crca_agent import CRCAAgent
+from path.to.crca import CRCAAgent
 
 agent = CRCAAgent(
     variables=["price", "demand", "inventory"],
@@ -71,236 +82,12 @@ Agent-style JSON payload example (orchestrators)
 
 ```python
 import json
-from path.to.crca_agent import CRCAAgent
+from path.to.crca import CRCAAgent
 
 agent = CRCAAgent(variables=["price","demand","inventory"])
 payload = json.dumps({"price": 100.0, "demand": 1000.0})
 out = agent.run(initial_state=payload, target_variables=["price"], max_steps=1)
 print(out["evolved_state"])
-```
-
-Complete example: Full workflow with system prompt
---------------------------------------------------
-This example demonstrates a complete workflow from imports to execution, including
-system prompt configuration, causal graph construction, and both LLM and deterministic modes.
-
-```python
-"""
-Complete CRCAAgent example: Full workflow from initialization to execution
-"""
-
-# 1. Imports
-from typing import Dict, Any
-from path.to.crca_agent import CRCAAgent
-
-# 2. System prompt configuration
-# Define a custom system prompt for domain-specific causal reasoning
-SYSTEM_PROMPT = """You are an expert causal reasoning analyst specializing in economic systems.
-Your role is to:
-- Identify causal relationships between economic variables
-- Analyze how interventions affect system outcomes
-- Generate plausible counterfactual scenarios
-- Provide clear, evidence-based causal explanations
-
-When analyzing causal relationships:
-1. Consider both direct and indirect causal paths
-2. Account for confounding factors
-3. Evaluate intervention plausibility
-4. Quantify expected causal effects when possible
-
-Always ground your analysis in the provided causal graph structure and observed data."""
-
-# 3. Agent initialization with system prompt
-agent = CRCAAgent(
-    variables=["price", "demand", "inventory", "supply", "competition"],
-    agent_name="economic-causal-analyst",
-    agent_description="Expert economic causal reasoning agent",
-    model_name="gpt-4o",  # or "gpt-4o-mini" for faster/cheaper analysis
-    max_loops=3,  # Number of reasoning loops for LLM-based analysis
-    system_prompt=SYSTEM_PROMPT,
-    verbose=True,  # Enable detailed logging
-)
-
-# 4. Build causal graph: Add causal relationships
-# Price negatively affects demand (higher price → lower demand)
-agent.add_causal_relationship("price", "demand", strength=-0.5)
-
-# Demand negatively affects inventory (higher demand → lower inventory)
-agent.add_causal_relationship("demand", "inventory", strength=-0.2)
-
-# Supply positively affects inventory (higher supply → higher inventory)
-agent.add_causal_relationship("supply", "inventory", strength=0.3)
-
-# Competition negatively affects price (more competition → lower price)
-agent.add_causal_relationship("competition", "price", strength=-0.4)
-
-# Price positively affects supply (higher price → more supply)
-agent.add_causal_relationship("price", "supply", strength=0.2)
-
-# 5. Verify graph structure
-print("Causal Graph Nodes:", agent.get_nodes())
-print("Causal Graph Edges:", agent.get_edges())
-print("Is DAG:", agent.is_dag())
-
-# 6. Example 1: LLM-based causal analysis (sophisticated reasoning)
-print("\n" + "="*80)
-print("EXAMPLE 1: LLM-Based Causal Analysis")
-print("="*80)
-
-task = """
-Analyze the causal relationship between price increases and inventory levels.
-Consider both direct and indirect causal paths. What interventions could
-stabilize inventory while maintaining profitability?
-"""
-
-result = agent.run(task=task)
-
-print("\n--- Causal Analysis Report ---")
-print(result["causal_analysis"])
-
-print("\n--- Counterfactual Scenarios ---")
-for i, scenario in enumerate(result["counterfactual_scenarios"][:3], 1):
-    print(f"\nScenario {i}: {scenario.name}")
-    print(f"  Interventions: {scenario.interventions}")
-    print(f"  Expected Outcomes: {scenario.expected_outcomes}")
-    print(f"  Probability: {scenario.probability:.3f}")
-    print(f"  Reasoning: {scenario.reasoning}")
-
-print("\n--- Causal Graph Info ---")
-print(f"Nodes: {result['causal_graph_info']['nodes']}")
-print(f"Edges: {result['causal_graph_info']['edges']}")
-print(f"Is DAG: {result['causal_graph_info']['is_dag']}")
-
-# 7. Example 2: Deterministic simulation (script-style)
-print("\n" + "="*80)
-print("EXAMPLE 2: Deterministic Causal Simulation")
-print("="*80)
-
-# Initial state
-initial_state = {
-    "price": 100.0,
-    "demand": 1000.0,
-    "inventory": 5000.0,
-    "supply": 2000.0,
-    "competition": 5.0,
-}
-
-# Run deterministic evolution
-simulation_result = agent.run(
-    initial_state=initial_state,
-    target_variables=["price", "demand", "inventory"],
-    max_steps=3,  # Evolve for 3 time steps
-)
-
-print("\n--- Initial State ---")
-for var, value in initial_state.items():
-    print(f"  {var}: {value}")
-
-print("\n--- Evolved State (after 3 steps) ---")
-for var, value in simulation_result["evolved_state"].items():
-    print(f"  {var}: {value:.2f}")
-
-print("\n--- Counterfactual Scenarios ---")
-for i, scenario in enumerate(simulation_result["counterfactual_scenarios"][:3], 1):
-    print(f"\nScenario {i}: {scenario.name}")
-    print(f"  Interventions: {scenario.interventions}")
-    print(f"  Expected Outcomes: {scenario.expected_outcomes}")
-    print(f"  Probability: {scenario.probability:.3f}")
-
-# 8. Example 3: Causal chain identification
-print("\n" + "="*80)
-print("EXAMPLE 3: Causal Chain Analysis")
-print("="*80)
-
-chain = agent.identify_causal_chain("competition", "inventory")
-if chain:
-    print(f"Causal chain from 'competition' to 'inventory': {' → '.join(chain)}")
-else:
-    print("No direct causal chain found")
-
-# 9. Example 4: Analyze causal strength
-print("\n" + "="*80)
-print("EXAMPLE 4: Causal Strength Analysis")
-print("="*80)
-
-strength_analysis = agent.analyze_causal_strength("price", "inventory")
-print(f"Direct edge strength: {strength_analysis.get('direct_strength', 'N/A')}")
-print(f"Path strength: {strength_analysis.get('path_strength', 'N/A')}")
-
-# 10. Example 5: Custom intervention prediction
-print("\n" + "="*80)
-print("EXAMPLE 5: Custom Intervention Prediction")
-print("="*80)
-
-# What if we reduce price by 20%?
-interventions = {"price": 80.0}  # 20% reduction from 100
-predicted = agent._predict_outcomes(initial_state, interventions)
-
-print("\nIntervention: Reduce price from 100 to 80 (20% reduction)")
-print("Predicted outcomes:")
-for var, value in predicted.items():
-    if var in initial_state:
-        change = value - initial_state[var]
-        change_pct = (change / initial_state[var]) * 100 if initial_state[var] != 0 else 0
-        print(f"  {var}: {initial_state[var]:.2f} → {value:.2f} ({change_pct:+.1f}%)")
-
-print("\n" + "="*80)
-print("Example execution complete!")
-print("="*80)
-```
-
-Expected output structure
--------------------------
-The `run()` method returns different structures depending on the mode:
-
-**LLM Mode** (task string):
-```python
-{
-    "task": str,  # The provided task string
-    "causal_analysis": str,  # Synthesized analysis report
-    "counterfactual_scenarios": List[CounterfactualScenario],  # Generated scenarios
-    "causal_graph_info": {
-        "nodes": List[str],
-        "edges": List[Tuple[str, str]],
-        "is_dag": bool
-    },
-    "analysis_steps": List[Dict[str, Any]]  # Step-by-step reasoning history
-}
-```
-
-**Deterministic Mode** (initial_state dict):
-```python
-{
-    "initial_state": Dict[str, float],  # Input state
-    "evolved_state": Dict[str, float],  # State after max_steps evolution
-    "counterfactual_scenarios": List[CounterfactualScenario],  # Generated scenarios
-    "causal_graph_info": {
-        "nodes": List[str],
-        "edges": List[Tuple[str, str]],
-        "is_dag": bool
-    },
-    "steps": int  # Number of evolution steps applied
-}
-```
-
-System prompt best practices
------------------------------
-1. **Domain-specific guidance**: Include domain knowledge relevant to your causal model
-2. **Causal reasoning principles**: Reference Pearl's causal hierarchy (association, intervention, counterfactual)
-3. **Output format**: Specify desired analysis structure and detail level
-4. **Plausibility constraints**: Guide the agent on what interventions are realistic
-5. **Quantification**: Encourage numerical estimates when appropriate
-
-Example system prompt template:
-```python
-SYSTEM_PROMPT = """You are a {domain} causal reasoning expert.
-Your analysis should:
-- Identify {specific_relationships}
-- Consider {relevant_factors}
-- Generate {scenario_types}
-- Provide {output_format}
-
-Ground your reasoning in the causal graph structure provided."""
 ```
 
 Why use `run()`
@@ -366,11 +153,138 @@ flowchart TB
   G1 --> O3
 ```
 
+Enhanced examples & full workflow
+---------------------------------
+The following examples show how to use the full power of CR-CA (data-driven fitting, non-linear SCM, AAP ensemble forecasting, and LLM-assisted analysis).
+
+1) Full data-driven workflow (fit, map, ensemble)
+
+```python
+from CR_CA import load_crca_agent
+import pandas as pd
+import numpy as np
+
+CRCAAgent = load_crca_agent()
+agent = CRCAAgent(
+    variables=["log_market_cap","trends","reddit_mentions","sentiment"],
+    model_name="gpt-4o",
+    max_loops=3,
+    agent_name="cr-ca-forecaster",
+    agent_description="CR-CA ensemble market-cap forecaster"
+)
+
+# Load historical series (aligned, cleaned)
+df = pd.read_csv("market_trends.csv", parse_dates=["date"])
+
+# Estimate edge strengths and z-stats from a rolling window
+agent.fit_from_dataframe(df, variables=["log_market_cap","trends","reddit_mentions","sentiment"], window=180)
+
+# Map regression coefficients to SCM edges (fit_from_dataframe does much of this automatically,
+# but you can also manually tune strengths/confidence)
+agent.add_causal_relationship("trends", "log_market_cap", strength=0.25, confidence=0.9)
+agent.add_causal_relationship("reddit_mentions", "log_market_cap", strength=0.15, confidence=0.8)
+
+# Prepare factual state (most recent observation)
+factual = {
+    "log_market_cap": np.log(df["market_cap"].iloc[-1]),
+    "trends": df["trends"].iloc[-1],
+    "reddit_mentions": df["reddit_mentions"].iloc[-1],
+    "sentiment": df["sentiment"].iloc[-1],
+}
+
+# Run an ensemble of AAP counterfactuals for 90 days
+ensemble = []
+N = 200
+for i in range(N):
+    # Optionally apply randomized policy shocks in some runs
+    interventions = {}  # e.g., {"trends": factual["trends"] * 1.02}
+    pred = agent.aap(factual, interventions)
+    ensemble.append(pred["log_market_cap"])  # or full trace if agent returns it
+
+# Aggregate ensemble predictions to mean/p10/p90
+mean_pred = np.mean(ensemble, axis=0)
+p10 = np.percentile(ensemble, 10, axis=0)
+p90 = np.percentile(ensemble, 90, axis=0)
+```
+
+2) LLM + deterministic hybrid: use LLM to propose plausible interventions, then simulate
+
+```python
+from CR_CA import load_crca_agent
+CRCAAgent = load_crca_agent()
+agent = CRCAAgent(
+    variables=["price","demand","inventory"],
+    model_name="gpt-4o",
+    max_loops=2,
+    agent_name="cr-ca-llm-hybrid",
+    agent_description="LLM-assisted intervention proposer"
+)
+
+# Ask the LLM to suggest interventions
+task = "Suggest 5 realistic interventions that could raise demand without increasing price."
+res = agent.run(task=task)
+proposed = [s["interventions"] for s in res.get("counterfactual_scenarios", [])][:5]
+
+# Simulate each proposed intervention using AAP
+for interventions in proposed:
+    out = agent.aap({"price":100,"demand":1000,"inventory":5000}, interventions)
+    print("Interventions:", interventions, "-> price:", out.get("price"))
+```
+
+3) Inspecting graph, edges, and diagnostics
+
+```python
+from CR_CA import load_crca_agent
+CRCAAgent = load_crca_agent()
+agent = CRCAAgent(variables=["a","b","c"], model_name="gpt-4o", agent_name="cr-ca-debug")
+agent.add_causal_relationship("a","b", strength=0.8, confidence=0.9, relation_type="direct")
+print("Nodes:", agent.get_nodes())
+print("Edges:", agent.get_edges())           # dict view with metadata
+print("rustworkx edges:", agent._graph.edge_list())  # internal view for debugging
+```
+
+Notable implementation details (v1.1.0+)
+---------------------------------------
+The Lite agent has received a number of engine and hygiene improvements. Key implementation notes and where to find them:
+
+- rustworkx-backed graph
+  - The internal causal graph is backed by `rustworkx.PyDiGraph` while retaining the original dict-of-dicts view for backward compatibility.
+  - Node index mapping helpers and sync logic live in `ceca_lite/crca-lite.py` (`_ensure_node_index`, `_node_to_index`, `_index_to_node`).
+
+- Edge metadata
+  - Edges now store metadata including `strength`, `confidence`, and `relation_type` (and optional interaction metadata). These are kept in the dict view and synchronized with rustworkx edge data.
+
+- Non-linear SCM & interaction terms
+  - A nonlinear evolution operator runs in z-space: see `_predict_z()` in `ceca_lite/crca-lite.py`.
+  - Supports interaction terms (registered via `add_interaction_term` / stored in `interaction_terms`) and a saturating activation (`tanh`) to prevent explosive linear growth.
+  - A shock-preservation heuristic (`shock_preserve_threshold`) preserves materially different observed z-values so benchmark-applied shocks propagate correctly.
+
+- Abduction–Action–Prediction (AAP)
+  - Full AAP workflow implemented in `counterfactual_abduction_action_prediction()` with an alias `aap()` for convenience.
+  - Abduction infers per-node noise in z-space and preserves it during counterfactual prediction.
+
+- Prediction caching (thread-safe)
+  - Cached wrapper `_predict_outcomes_cached()` uses deterministic tuple keys and a FIFO eviction policy (evicts oldest 10% when full).
+  - Toggle caching with `enable_cache(True/False)` and clear cache with `clear_cache()`.
+  - A coarse-grained `threading.Lock` (`_prediction_cache_lock`) protects cache accesses in multi-threaded runs.
+
+- Utilities added
+  - `fit_from_dataframe()` (lightweight estimation of edge strengths and standardization stats).
+  - Graph helpers: `_topological_sort()` (rustworkx preferred with fallback), `identify_causal_chain()`, `detect_confounders()`, `identify_adjustment_set()`.
+  - Standardization behavior improved: `ensure_standardization_stats()` creates sensible fallbacks and `_predict_z()` preserves exogenous observed z when appropriate.
+
+- CI, tests, and docs
+  - `requirements.txt` lists minimal pinned deps for CI and local setup.
+  - GitHub Actions workflow: `.github/workflows/sanity.yml` runs `examples/sanity_check.py` on push/PR.
+  - Pytest smoke test: `tests/test_crca_core.py` exercises basic prediction, cache, and graph utilities.
+  - Small README added at `ceca_lite/README.md` documenting the cache lock and sanity check usage.
+
+These additions are intentionally conservative and backward-compatible: public APIs and the `run()` interface were not changed.
+
 Complete method index (quick)
 -----------------------------
 The following is the public surface implemented by `CRCAAgent` (Lite) in
-`ceca_lite/crca-lite.py`.
-
+`CRCA/CRCA.py`.
 LLM integration
 - `_get_cr_ca_schema()` — CR-CA function calling schema for structured reasoning
 - `step(task)` — Execute a single step of LLM-based causal reasoning
@@ -487,11 +401,31 @@ Design notes & limitations
 Extending & integration
 -----------------------
 For advanced capabilities (structure learning, Bayesian inference, optimization,
-extensive statistical methods), use the full CRCA Agent featured [WIP]
-The Lite version provides core causal reasoning with LLM support while maintaining minimal dependencies.
+extensive statistical methods), Await further updates. E V E R Y T H I N G Has been pre-planned already.
 
 References
 ----------
 - Pearl, J. (2009). *Causality: Models, Reasoning, and Inference*.
 - Pearl, J., & Mackenzie, D. (2018). *The Book of Why*.
 
+---
+CRCAAgent (Lite) — lightweight causal reasoning Agent with LLM integration for Swarms.
+
+Implementation: `CR-CA/CRCA.py`  
+Canonical import: `from path.to.crca import CRCAAgent`  (or use `from path.to.crca import load_crca_agent()` in this repository layout)
+
+
+
+Changelog
+---------
+
+- v1.1.0
+  - Small production hardening pass:
+    - Added a coarse-grained thread-safe lock protecting the in-memory prediction cache to avoid basic race conditions in multi-threaded runs.
+    - Introduced `requirements.txt` pin list for CI and local setup.
+    - Added a minimal GitHub Actions sanity workflow (`.github/workflows/sanity.yml`) that runs `examples/sanity_check.py`.
+    - Included a pytest smoke test (`tests/test_core.py`) that validates basic prediction, cache, and graph utilities.
+    - Added `ceca_lite/README.md` documenting the cache lock and sanity-check usage.
+
+- v1.0.0
+  - Initial creation of CRCAAgent (Lite): core causal DAG, linear SCM evolution, counterfactual generation, and LLM integration.
