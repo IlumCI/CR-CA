@@ -11,7 +11,7 @@ from importlib.util import spec_from_file_location, module_from_spec
 from pathlib import Path
 
 __all__ = ["load_crca_agent", "__version__"]
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 
 def load_crca_agent():
@@ -19,7 +19,7 @@ def load_crca_agent():
     Load and return the `CRCAAgent` class object from `crca-lite.py`.
 
     Returns:
-        class: The `CRCAAgent` class defined in `CRCA.py`.
+        class: The `CRCAAgent` class defined in `crca-lite.py`.
     """
     # In this repository layout the implementation file is `CRCA.py`
     module_path = Path(__file__).resolve().parent / "CRCA.py"
