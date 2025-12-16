@@ -8,7 +8,7 @@ import requests,pandas as pd,numpy as np
 from loguru import logger
 from dotenv import load_dotenv
 from swarms import Agent
-from swarms.agents import CRCAAgent
+from CRCA import CRCAAgent
 try:from rich.console import Console;from rich.table import Table;from rich.panel import Panel;from rich.columns import Columns;from rich.layout import Layout;from rich.text import Text;from rich import box;from rich.align import Align;from rich.progress import Progress,SpinnerColumn,TextColumn,BarColumn,TimeRemainingColumn;RICH_AVAILABLE=True
 except ImportError:RICH_AVAILABLE=False;Console=None
 DAYS_BACK=90
