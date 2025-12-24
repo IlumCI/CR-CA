@@ -52,10 +52,16 @@ except Exception:
 # Load environment variables from .env file
 try:
     from dotenv import load_dotenv
+    import os
 
-    load_dotenv()
+    # Explicitly load from .env file in the project root
+    env_path = os.path.join(os.path.dirname(__file__), '.env')
+    load_dotenv(dotenv_path=env_path, override=False)
 except ImportError:
     # dotenv not available, skip loading
+    pass
+except Exception:
+    # .env file might not exist, that's okay
     pass
 
 # Local imports
