@@ -20,11 +20,17 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Literal, Optional, Sequence, Tuple, Union
 
 # Load environment variables from .env file
+# Note: We don't override here to allow user scripts to control loading order
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    import os
+    env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
+    load_dotenv(dotenv_path=env_path, override=False)
 except ImportError:
     # dotenv not available, skip loading
+    pass
+except Exception:
+    # .env file might not exist, that's okay
     pass
 
 import toml
