@@ -1,19 +1,33 @@
+"""CRCAAgent - Causal Reasoning and Counterfactual Analysis Agent.
 
+This module provides a lightweight causal reasoning agent with LLM integration,
+implemented in pure Python and intended as a flexible CR-CA engine for Swarms.
+"""
 
-from typing import Dict, Any, List, Tuple, Optional, Union
+# Standard library imports
 import asyncio
+import importlib
+import inspect
 import logging
 import math
-import numpy as np
+import os
+import threading
 from dataclasses import dataclass
 from enum import Enum
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+# Third-party imports
+import numpy as np
+from loguru import logger
 from swarms.structs.agent import Agent
-import threading
-import inspect
+
+# Try to import rustworkx (required dependency)
 try:
     import rustworkx as rx
 except Exception as e:
-    raise ImportError("rustworkx is required for the CRCAAgent rustworkx upgrade: pip install rustworkx") from e
+    raise ImportError(
+        "rustworkx is required for the CRCAAgent rustworkx upgrade: pip install rustworkx"
+    ) from e
 
 # Optional heavy dependencies — used when available
 try:
@@ -23,8 +37,8 @@ except Exception:
     PANDAS_AVAILABLE = False
 
 try:
-    from scipy import stats as scipy_stats  # type: ignore
     from scipy import linalg as scipy_linalg  # type: ignore
+    from scipy import stats as scipy_stats  # type: ignore
     SCIPY_AVAILABLE = True
 except Exception:
     SCIPY_AVAILABLE = False
@@ -35,10 +49,24 @@ try:
 except Exception:
     CVXPY_AVAILABLE = False
 
-logger = logging.getLogger(__name__)
-
+# Load environment variables from .env file
 try:
-    import importlib
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    # dotenv not available, skip loading
+    pass
+
+# Local imports
+try:
+    from prompts.default_crca import DEFAULT_CRCA_SYSTEM_PROMPT
+except ImportError:
+    # Fallback if prompt file doesn't exist
+    DEFAULT_CRCA_SYSTEM_PROMPT = None
+
+# Fix litellm async compatibility
+try:
     lu_spec = importlib.util.find_spec("litellm.litellm_core_utils.logging_utils")
     if lu_spec is not None:
         lu = importlib.import_module("litellm.litellm_core_utils.logging_utils")
@@ -52,6 +80,11 @@ except Exception:
 
 
 class CausalRelationType(Enum):
+    """Enumeration of causal relationship types.
+    
+    Defines the different types of causal relationships that can exist
+    between variables in a causal graph.
+    """
     
     DIRECT = "direct"
     INDIRECT = "indirect"
@@ -62,6 +95,14 @@ class CausalRelationType(Enum):
 
 @dataclass
 class CausalNode:
+    """Represents a node in the causal graph.
+    
+    Attributes:
+        name: Name of the variable/node
+        value: Current value of the variable (optional)
+        confidence: Confidence level in the node (default: 1.0)
+        node_type: Type of the node (default: "variable")
+    """
     
     name: str
     value: Optional[float] = None
@@ -71,6 +112,15 @@ class CausalNode:
 
 @dataclass
 class CausalEdge:
+    """Represents an edge (causal relationship) in the causal graph.
+    
+    Attributes:
+        source: Source variable name
+        target: Target variable name
+        strength: Strength of the causal relationship (default: 1.0)
+        relation_type: Type of causal relation (default: DIRECT)
+        confidence: Confidence level in the edge (default: 1.0)
+    """
     
     source: str
     target: str
@@ -81,6 +131,15 @@ class CausalEdge:
 
 @dataclass
 class CounterfactualScenario:
+    """Represents a counterfactual scenario for analysis.
+    
+    Attributes:
+        name: Name/identifier of the scenario
+        interventions: Dictionary mapping variable names to intervention values
+        expected_outcomes: Dictionary mapping variable names to expected outcomes
+        probability: Probability of this scenario (default: 1.0)
+        reasoning: Explanation of why this scenario is important
+    """
     
     name: str
     interventions: Dict[str, float]
@@ -90,7 +149,27 @@ class CounterfactualScenario:
 
 
 class CRCAAgent(Agent):
+    """Causal Reasoning with Counterfactual Analysis Agent.
     
+    A lightweight causal reasoning agent with LLM integration, providing both
+    LLM-based causal analysis and deterministic causal simulation. Supports
+    automatic variable extraction, causal graph management, counterfactual
+    scenario generation, and comprehensive causal analysis.
+    
+    Key Features:
+        - LLM integration for sophisticated causal reasoning
+        - Dual-mode operation: LLM-based analysis and deterministic simulation
+        - Automatic variable extraction from natural language tasks
+        - Causal graph management with rustworkx backend
+        - Counterfactual scenario generation
+        - Batch prediction support
+        - Async/await support for concurrent operations
+    
+    Attributes:
+        causal_graph: Dictionary representing the causal graph structure
+        causal_memory: List storing analysis steps and results
+        causal_max_loops: Maximum number of loops for causal reasoning
+    """
 
     def __init__(
         self,
@@ -109,32 +188,158 @@ class CRCAAgent(Agent):
         bootstrap_workers: int = 0,
         use_async: bool = False,
         seed: Optional[int] = None,
+        enable_excel: bool = False,
+        agent_max_loops: Optional[Union[int, str]] = None,
         **kwargs,
     ):
+        """
+        Initialize CRCAAgent with causal reasoning capabilities.
+        
+        Args:
+            variables: List of variable names for the causal graph
+            causal_edges: List of (source, target) tuples defining causal relationships
+            max_loops: Maximum loops for causal reasoning (default: 3)
+            agent_max_loops: Maximum loops for standard Agent operations (supports "auto")
+                            If not provided, defaults to 1 for individual LLM calls.
+                            Pass "auto" to enable automatic loop detection for standard operations.
+            **kwargs: Additional arguments passed to parent Agent class
+        """
         
         cr_ca_schema = CRCAAgent._get_cr_ca_schema()
+        extract_variables_schema = CRCAAgent._get_extract_variables_schema()
         
         # Backwards-compatible alias for description
         agent_description = description or agent_description
+
+        # Handle max_loops for standard Agent operations
+        # agent_max_loops parameter takes precedence, then check kwargs, then default to 1
+        if agent_max_loops is None:
+            agent_max_loops = kwargs.pop("max_loops", 1)
+        else:
+            # Remove max_loops from kwargs if agent_max_loops was explicitly provided
+            kwargs.pop("max_loops", None)
+
+        # Merge tools_list_dictionary from kwargs with CRCA schema
+        # Only add CRCA schema if user hasn't explicitly disabled it
+        use_crca_tools = kwargs.pop("use_crca_tools", True)  # Default to True for backwards compatibility
+        existing_tools = kwargs.pop("tools_list_dictionary", [])
+        if not isinstance(existing_tools, list):
+            existing_tools = [existing_tools] if existing_tools else []
+        
+        # Only add CRCA schemas if enabled
+        if use_crca_tools:
+            tools_list = [cr_ca_schema, extract_variables_schema] + existing_tools
+        else:
+            tools_list = existing_tools
+        
+        # Get existing callable tools (functions) from kwargs
+        existing_callable_tools = kwargs.pop("tools", [])
+        if not isinstance(existing_callable_tools, list):
+            existing_callable_tools = [existing_callable_tools] if existing_callable_tools else []
 
         agent_kwargs = {
             "agent_name": agent_name,
             "agent_description": agent_description,
             "model_name": model_name,
-            "max_loops": 1,  # Individual LLM calls use 1 loop, we handle multi-loop reasoning
-            "tools_list_dictionary": [cr_ca_schema],
+            "max_loops": agent_max_loops,  # Use user-provided value or default to 1
             "output_type": "final",
-            **kwargs,
+            **kwargs,  # All other Agent parameters passed through
         }
         
-        if system_prompt is not None:
-            agent_kwargs["system_prompt"] = system_prompt
+        # Always provide tools_list_dictionary if we have schemas
+        # This ensures the LLM knows about the tools
+        if tools_list:
+            agent_kwargs["tools_list_dictionary"] = tools_list
+        
+        # Add existing callable tools if any
+        if existing_callable_tools:
+            agent_kwargs["tools"] = existing_callable_tools
+        
+        # Always apply default CRCA prompt as base, then add custom prompt on top if provided
+        final_system_prompt = None
+        if DEFAULT_CRCA_SYSTEM_PROMPT is not None:
+            if system_prompt is not None:
+                # Combine: default first, then custom on top
+                final_system_prompt = f"{DEFAULT_CRCA_SYSTEM_PROMPT}\n\n--- Additional Instructions ---\n{system_prompt}"
+            else:
+                # Just use default
+                final_system_prompt = DEFAULT_CRCA_SYSTEM_PROMPT
+        elif system_prompt is not None:
+            # If no default but custom prompt provided, use custom prompt
+            final_system_prompt = system_prompt
+        
+        if final_system_prompt is not None:
+            agent_kwargs["system_prompt"] = final_system_prompt
         if global_system_prompt is not None:
             agent_kwargs["global_system_prompt"] = global_system_prompt
         if secondary_system_prompt is not None:
             agent_kwargs["secondary_system_prompt"] = secondary_system_prompt
         
         super().__init__(**agent_kwargs)
+        
+        # Now that self exists, create and add the CRCA tool handlers if tools are enabled
+        if use_crca_tools:
+            # Create a wrapper function with the correct name that matches the schema
+            def generate_causal_analysis(
+                causal_analysis: str,
+                intervention_planning: str,
+                counterfactual_scenarios: List[Dict[str, Any]],
+                causal_strength_assessment: str,
+                optimal_solution: str,
+            ) -> Dict[str, Any]:
+                """Tool handler for generate_causal_analysis - wrapper that calls the instance method."""
+                return self._generate_causal_analysis_handler(
+                    causal_analysis=causal_analysis,
+                    intervention_planning=intervention_planning,
+                    counterfactual_scenarios=counterfactual_scenarios,
+                    causal_strength_assessment=causal_strength_assessment,
+                    optimal_solution=optimal_solution,
+                )
+            
+            # Create a wrapper function for extract_causal_variables
+            def extract_causal_variables(
+                required_variables: List[str],
+                causal_edges: List[List[str]],
+                reasoning: str,
+                optional_variables: Optional[List[str]] = None,
+                counterfactual_variables: Optional[List[str]] = None,
+            ) -> Dict[str, Any]:
+                """Tool handler for extract_causal_variables - wrapper that calls the instance method."""
+                return self._extract_causal_variables_handler(
+                    required_variables=required_variables,
+                    causal_edges=causal_edges,
+                    reasoning=reasoning,
+                    optional_variables=optional_variables,
+                    counterfactual_variables=counterfactual_variables,
+                )
+            
+            # Add the wrapper functions to the tools list
+            # The function names must match the schema names
+            if self.tools is None:
+                self.tools = []
+            self.add_tool(generate_causal_analysis)
+            self.add_tool(extract_causal_variables)
+            
+            # CRITICAL: Re-initialize tool_struct after adding tools
+            # This ensures the BaseTool instance has the updated tools and function_map
+            if hasattr(self, 'setup_tools'):
+                self.tool_struct = self.setup_tools()
+            
+            # Ensure tools_list_dictionary is set with our manual schemas
+            if not self.tools_list_dictionary or len(self.tools_list_dictionary) == 0:
+                self.tools_list_dictionary = [cr_ca_schema, extract_variables_schema] + existing_tools
+            else:
+                # Replace any auto-generated schemas with our manual ones
+                our_tool_names = {"generate_causal_analysis", "extract_causal_variables"}
+                filtered = []
+                for schema in self.tools_list_dictionary:
+                    if isinstance(schema, dict):
+                        func_name = schema.get("function", {}).get("name", "")
+                        if func_name in our_tool_names:
+                            continue  # Skip auto-generated, we'll add manual
+                    filtered.append(schema)
+                # Add our manual schemas first, then existing tools
+                self.tools_list_dictionary = [cr_ca_schema, extract_variables_schema] + filtered
         
         self.causal_max_loops = max_loops
         self.causal_graph: Dict[str, Dict[str, float]] = {}
@@ -170,6 +375,43 @@ class CRCAAgent(Agent):
         self._prediction_cache_max: int = 1000
         self._cache_enabled: bool = True
         self._prediction_cache_lock = threading.Lock()
+        
+        # Excel TUI integration
+        self._excel_enabled = bool(enable_excel)
+        self._excel_tables = None
+        self._excel_eval_engine = None
+        self._excel_scm_bridge = None
+        self._excel_dependency_graph = None
+        
+        if enable_excel:
+            try:
+                from crca_excel.core.tables import TableManager
+                from crca_excel.core.deps import DependencyGraph
+                from crca_excel.core.eval import EvaluationEngine
+                from crca_excel.core.scm import SCMBridge
+                
+                self._excel_tables = TableManager()
+                self._excel_dependency_graph = DependencyGraph()
+                self._excel_eval_engine = EvaluationEngine(
+                    self._excel_tables,
+                    self._excel_dependency_graph,
+                    max_iter=self.causal_max_loops if isinstance(self.causal_max_loops, int) else 100,
+                    epsilon=1e-6
+                )
+                self._excel_scm_bridge = SCMBridge(
+                    self._excel_tables,
+                    self._excel_eval_engine,
+                    crca_agent=self
+                )
+                
+                # Initialize standard tables
+                self._initialize_excel_tables()
+                
+                # Link causal graph to tables
+                self._link_causal_graph_to_tables()
+            except ImportError as e:
+                logger.warning(f"Excel TUI modules not available: {e}")
+                self._excel_enabled = False
 
     @staticmethod
     def _get_cr_ca_schema() -> Dict[str, Any]:
@@ -223,10 +465,293 @@ class CRCAAgent(Agent):
             }
         }
 
-    def step(self, task: str) -> str:
+    @staticmethod
+    def _get_extract_variables_schema() -> Dict[str, Any]:
+        """
+        Get the schema for the extract_causal_variables tool.
         
+        Returns:
+            Dictionary containing the OpenAI function schema for variable extraction
+        """
+        return {
+            "type": "function",
+            "function": {
+                "name": "extract_causal_variables",
+                "description": "Extract and propose causal variables, relationships, and counterfactual scenarios needed for causal analysis",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "required_variables": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Core variables that must be included for causal analysis"
+                        },
+                        "optional_variables": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Additional variables that may be useful but not essential"
+                        },
+                        "causal_edges": {
+                            "type": "array",
+                            "items": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "minItems": 2,
+                                "maxItems": 2
+                            },
+                            "description": "Causal relationships as [source, target] pairs"
+                        },
+                        "counterfactual_variables": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Variables to explore in counterfactual scenarios"
+                        },
+                        "reasoning": {
+                            "type": "string",
+                            "description": "Explanation of why these variables and relationships are needed"
+                        }
+                    },
+                    "required": ["required_variables", "causal_edges", "reasoning"]
+                }
+            }
+        }
+
+    def step(self, task: str) -> str:
+        """
+        Execute a single step of causal reasoning.
+        
+        Args:
+            task: Task string to process
+            
+        Returns:
+            Response string from the agent
+        """
         response = super().run(task)
         return response
+    
+    def _generate_causal_analysis_handler(
+        self,
+        causal_analysis: str,
+        intervention_planning: str,
+        counterfactual_scenarios: List[Dict[str, Any]],
+        causal_strength_assessment: str,
+        optimal_solution: str,
+    ) -> Dict[str, Any]:
+        """
+        Handler function for the generate_causal_analysis tool.
+        
+        This function is called when the LLM invokes the generate_causal_analysis tool.
+        It processes the tool's output and integrates it into the causal graph.
+        
+        Args:
+            causal_analysis: Analysis of causal relationships and mechanisms
+            intervention_planning: Planned interventions to test causal hypotheses
+            counterfactual_scenarios: List of counterfactual scenarios
+            causal_strength_assessment: Assessment of causal relationship strengths
+            optimal_solution: Recommended optimal solution
+            
+        Returns:
+            Dictionary with processed results
+        """
+        logger.info("Processing causal analysis from tool call")
+        
+        # Store the analysis in causal memory
+        analysis_entry = {
+            'type': 'analysis',  # Mark this as an analysis entry
+            'causal_analysis': causal_analysis,
+            'intervention_planning': intervention_planning,
+            'counterfactual_scenarios': counterfactual_scenarios,
+            'causal_strength_assessment': causal_strength_assessment,
+            'optimal_solution': optimal_solution,
+            'timestamp': len(self.causal_memory)
+        }
+        
+        self.causal_memory.append(analysis_entry)
+        
+        # Try to extract and update causal relationships from the analysis
+        # This is a simple implementation - can be enhanced later
+        try:
+            # The LLM might mention relationships in the analysis
+            # For now, we'll just store the analysis
+            # In a more advanced version, we could parse the analysis to extract relationships
+            pass
+        except Exception as e:
+            logger.warning(f"Error processing causal analysis: {e}")
+        
+        # Return a structured response
+        return {
+            "status": "success",
+            "message": "Causal analysis processed and stored",
+            "analysis_summary": {
+                "causal_analysis_length": len(causal_analysis),
+                "num_scenarios": len(counterfactual_scenarios),
+                "has_optimal_solution": bool(optimal_solution)
+            }
+        }
+
+    def _extract_causal_variables_handler(
+        self,
+        required_variables: List[str],
+        causal_edges: List[List[str]],
+        reasoning: str,
+        optional_variables: Optional[List[str]] = None,
+        counterfactual_variables: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Handler function for the extract_causal_variables tool.
+        
+        This function is called when the LLM invokes the extract_causal_variables tool.
+        It processes the tool's output and adds variables and edges to the causal graph.
+        
+        Args:
+            required_variables: Core variables that must be included for causal analysis
+            causal_edges: Causal relationships as [source, target] pairs
+            reasoning: Explanation of why these variables and relationships are needed
+            optional_variables: Additional variables that may be useful but not essential
+            counterfactual_variables: Variables to explore in counterfactual scenarios
+            
+        Returns:
+            Dictionary with processed results and summary of what was added
+        """
+        import traceback
+        
+        try:
+            logger.info("=== EXTRACT HANDLER CALLED ===")
+            logger.info(f"Processing variable extraction from tool call")
+            logger.info(f"Received required_variables: {required_variables} (type: {type(required_variables)})")
+            logger.info(f"Received causal_edges: {causal_edges} (type: {type(causal_edges)})")
+            logger.info(f"Received optional_variables: {optional_variables}")
+            logger.info(f"Received counterfactual_variables: {counterfactual_variables}")
+            
+            # Validate inputs
+            if not required_variables:
+                logger.warning("No required_variables provided!")
+                required_variables = []
+            if not isinstance(required_variables, list):
+                logger.warning(f"required_variables is not a list: {type(required_variables)}")
+                required_variables = [str(required_variables)] if required_variables else []
+            
+            if not causal_edges:
+                logger.warning("No causal_edges provided!")
+                causal_edges = []
+            if not isinstance(causal_edges, list):
+                logger.warning(f"causal_edges is not a list: {type(causal_edges)}")
+                causal_edges = []
+            
+            # Track what was added
+            added_variables = []
+            added_edges = []
+            skipped_edges = []
+            
+            # Add required variables
+            for var in required_variables:
+                if var and var.strip():
+                    var_clean = var.strip()
+                    if var_clean not in self.causal_graph:
+                        self._ensure_node_exists(var_clean)
+                        added_variables.append(var_clean)
+            
+            # Add optional variables
+            if optional_variables:
+                for var in optional_variables:
+                    if var and var.strip():
+                        var_clean = var.strip()
+                        if var_clean not in self.causal_graph:
+                            self._ensure_node_exists(var_clean)
+                            added_variables.append(var_clean)
+            
+            # Add counterfactual variables (also add them as nodes)
+            if counterfactual_variables:
+                for var in counterfactual_variables:
+                    if var and var.strip():
+                        var_clean = var.strip()
+                        if var_clean not in self.causal_graph:
+                            self._ensure_node_exists(var_clean)
+                            if var_clean not in added_variables:
+                                added_variables.append(var_clean)
+            
+            # Add causal edges
+            for edge in causal_edges:
+                if isinstance(edge, (list, tuple)) and len(edge) >= 2:
+                    source = str(edge[0]).strip() if edge[0] else None
+                    target = str(edge[1]).strip() if edge[1] else None
+                    
+                    if source and target:
+                        # Ensure both nodes exist
+                        if source not in self.causal_graph:
+                            self._ensure_node_exists(source)
+                            if source not in added_variables:
+                                added_variables.append(source)
+                        if target not in self.causal_graph:
+                            self._ensure_node_exists(target)
+                            if target not in added_variables:
+                                added_variables.append(target)
+                        
+                        # Add the edge
+                        try:
+                            self.add_causal_relationship(source, target)
+                            added_edges.append((source, target))
+                        except Exception as e:
+                            logger.warning(f"Failed to add edge {source} -> {target}: {e}")
+                            skipped_edges.append((source, target))
+                else:
+                    logger.warning(f"Invalid edge format: {edge}")
+                    skipped_edges.append(edge)
+            
+            # Store extraction metadata in causal memory
+            extraction_entry = {
+                'type': 'variable_extraction',
+                'required_variables': required_variables,
+                'optional_variables': optional_variables or [],
+                'counterfactual_variables': counterfactual_variables or [],
+                'causal_edges': causal_edges,
+                'reasoning': reasoning,
+                'added_variables': added_variables,
+                'added_edges': added_edges,
+                'skipped_edges': skipped_edges,
+                'timestamp': len(self.causal_memory)
+            }
+            
+            self.causal_memory.append(extraction_entry)
+            
+            # Log what was actually added
+            logger.info(f"Extraction complete: Added {len(added_variables)} variables, {len(added_edges)} edges")
+            logger.info(f"Added variables: {added_variables}")
+            logger.info(f"Added edges: {added_edges}")
+            logger.info(f"Current graph size: {len(self.causal_graph)} variables, {sum(len(children) for children in self.causal_graph.values())} edges")
+            
+            # Return a structured response
+            result = {
+                "status": "success",
+                "message": "Variables and relationships extracted and added to causal graph",
+                "summary": {
+                    "variables_added": len(added_variables),
+                    "edges_added": len(added_edges),
+                    "edges_skipped": len(skipped_edges),
+                    "total_variables_in_graph": len(self.causal_graph),
+                    "total_edges_in_graph": sum(len(children) for children in self.causal_graph.values())
+                },
+                "details": {
+                    "added_variables": added_variables,
+                    "added_edges": added_edges,
+                    "skipped_edges": skipped_edges if skipped_edges else None
+                }
+            }
+            logger.info(f"Returning result: {result}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"ERROR in _extract_causal_variables_handler: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            # Return error but don't fail completely
+            return {
+                "status": "error",
+                "message": f"Error processing variable extraction: {str(e)}",
+                "summary": {
+                    "variables_added": 0,
+                    "edges_added": 0,
+                }
+            }
 
     def _build_causal_prompt(self, task: str) -> str:
         return (
@@ -236,17 +761,184 @@ class CRCAAgent(Agent):
             f"{sum(len(children) for children in self.causal_graph.values())} relationships.\n"
         )
 
-    def _build_memory_context(self) -> str:
+    def _build_variable_extraction_prompt(self, task: str) -> str:
+        """
+        Build a prompt that guides the LLM to extract variables from a task.
         
+        Args:
+            task: The task string to analyze
+            
+        Returns:
+            Formatted prompt string for variable extraction
+        """
+        return (
+            "You are analyzing a causal reasoning task. The causal graph is currently empty.\n"
+            f"Task: {task}\n\n"
+            "**CRITICAL: You MUST use the extract_causal_variables tool to proceed.**\n"
+            "Do NOT just describe what variables might be needed - you MUST call the tool.\n\n"
+            "Call the extract_causal_variables tool with:\n"
+            "1. required_variables: List of core variables needed for causal analysis\n"
+            "2. causal_edges: List of [source, target] pairs showing causal relationships\n"
+            "3. reasoning: Explanation of why these variables are needed\n"
+            "4. optional_variables: (optional) Additional variables that may be useful\n"
+            "5. counterfactual_variables: (optional) Variables to explore in what-if scenarios\n\n"
+            "Example: For a pricing task, you might extract:\n"
+            "- required_variables: ['price', 'demand', 'supply', 'cost']\n"
+            "- causal_edges: [['price', 'demand'], ['cost', 'price'], ['supply', 'price']]\n"
+            "- reasoning: 'Price affects demand, cost affects price, supply affects price'\n\n"
+            "You can call the tool multiple times to refine your extraction.\n"
+            "Be thorough - extract all variables and relationships implied by the task."
+        )
+
+    def _build_memory_context(self) -> str:
+        """Build memory context from causal_memory, handling different memory entry structures."""
         context_parts = []
         for step in self.causal_memory[-2:]:  # Last 2 steps
-            context_parts.append(f"Step {step['step']}: {step['analysis']}")
-        return "\n".join(context_parts)
+            if isinstance(step, dict):
+                # Handle standard analysis step structure
+                if 'step' in step and 'analysis' in step:
+                    context_parts.append(f"Step {step['step']}: {step['analysis']}")
+                # Handle extraction entry structure
+                elif 'type' in step and step.get('type') == 'extraction':
+                    context_parts.append(f"Variable Extraction: {step.get('summary', 'Variables extracted')}")
+                # Handle generic entry
+                elif 'analysis' in step:
+                    context_parts.append(f"Analysis: {step['analysis']}")
+                elif 'summary' in step:
+                    context_parts.append(f"Summary: {step['summary']}")
+        return "\n".join(context_parts) if context_parts else ""
 
     def _synthesize_causal_analysis(self, task: str) -> str:
+        """
+        Synthesize a final causal analysis report from the analysis steps.
         
+        Uses direct LLM call to avoid Agent tool execution issues.
+        
+        Args:
+            task: Original task string
+            
+        Returns:
+            Synthesized causal analysis report
+        """
         synthesis_prompt = f"Based on the causal analysis steps performed, synthesize a concise causal report for: {task}"
-        return self.step(synthesis_prompt)
+        try:
+            # Use direct LLM call to avoid tool execution errors
+            response = self._call_llm_directly(synthesis_prompt)
+            return str(response) if response else "Analysis synthesis failed"
+        except Exception as e:
+            logger.error(f"Error synthesizing causal analysis: {e}")
+            return "Analysis synthesis failed"
+    
+    def _should_trigger_causal_analysis(self, task: Optional[Union[str, Any]]) -> bool:
+        """
+        Automatically detect if a task should trigger causal analysis.
+        
+        This method analyzes the task content to determine if it requires
+        causal reasoning, counterfactual analysis, or relationship analysis.
+        
+        Args:
+            task: The task string to analyze
+            
+        Returns:
+            True if causal analysis should be triggered, False otherwise
+        """
+        if task is None:
+            return False
+        
+        if not isinstance(task, str):
+            return False
+        
+        task_lower = task.lower().strip()
+        
+        # Keywords that indicate causal analysis is needed
+        causal_keywords = [
+            # Causal relationship terms
+            'causal', 'causality', 'cause', 'causes', 'caused by', 'causing',
+            'relationship', 'relationships', 'relate', 'relates', 'related',
+            'influence', 'influences', 'influenced', 'affect', 'affects', 'affected',
+            'impact', 'impacts', 'impacted', 'effect', 'effects',
+            'depend', 'depends', 'dependency', 'dependencies',
+            'correlation', 'correlate', 'correlates',
+            
+            # Counterfactual analysis terms
+            'counterfactual', 'counterfactuals', 'what if', 'what-if',
+            'scenario', 'scenarios', 'alternative', 'alternatives',
+            'hypothetical', 'hypothesis', 'hypotheses',
+            'if then', 'if-then', 'suppose', 'assuming',
+            
+            # Prediction and forecasting terms (often need causal reasoning)
+            'predict', 'prediction', 'forecast', 'forecasting', 'project', 'projection',
+            'expected', 'expect', 'expectation', 'estimate', 'estimation',
+            'future', 'future value', 'future price', 'in 24 months', 'in X months',
+            'will be', 'would be', 'could be', 'might be',
+            
+            # Analysis terms
+            'analyze', 'analysis', 'analyzing', 'analyze the', 'analyze how',
+            'understand', 'understanding', 'explain', 'explanation',
+            'reasoning', 'reason', 'rationale',
+            
+            # Relationship-specific terms
+            'between', 'among', 'link', 'links', 'connection', 'connections',
+            'chain', 'chains', 'path', 'paths', 'flow', 'flows',
+            
+            # Intervention terms
+            'intervention', 'interventions', 'change', 'changes', 'modify', 'modifies',
+            'adjust', 'adjusts', 'alter', 'alters',
+            
+            # Risk and consequence terms (NEW)
+            'risk', 'risks', 'consequence', 'consequences', 'benefit', 'benefits',
+            'trade-off', 'trade-offs', 'tradeoff', 'tradeoffs',
+            'downside', 'downsides', 'upside', 'upsides',
+            
+            # Determination and outcome terms (NEW)
+            'determine', 'determines', 'determining', 'determination',
+            'result', 'results', 'resulting', 'outcome', 'outcomes',
+            'consideration', 'considerations', 'factor', 'factors',
+            'driver', 'drivers', 'driving', 'drives', 'driven',
+            'lead to', 'leads to', 'leading to', 'led to',
+            
+            # Decision-making terms (NEW)
+            'should', 'should we', 'should i', 'should they',
+            'better', 'best', 'worse', 'worst', 'compare', 'comparison',
+            'option', 'options', 'choice', 'choices', 'choose',
+            'strategy', 'strategies', 'approach', 'approaches',
+            'decision', 'decisions', 'decide',
+            
+            # Importance and consideration terms (NEW)
+            'important', 'importance', 'matter', 'matters', 'mattering',
+            'consider', 'considering', 'consideration', 'considerations',
+            'key', 'keys', 'critical', 'crucial', 'essential',
+        ]
+        
+        # Check if task contains causal keywords
+        for keyword in causal_keywords:
+            if keyword in task_lower:
+                return True
+        
+        # Check for questions about variables in the causal graph
+        # If the task mentions any of our variables, it's likely a causal question
+        graph_variables = [var.lower() for var in self.causal_graph.keys()]
+        for var in graph_variables:
+            if var in task_lower:
+                return True
+        
+        # Check for patterns that suggest causal reasoning
+        causal_patterns = [
+            'how does', 'how do', 'how will', 'how would', 'how might', 'how can',
+            'why does', 'why do', 'why will', 'why would', 'why did',
+            'what happens if', 'what would happen', 'what will happen', 'what happens when',
+            'if we', 'if you', 'if they', 'if it', 'if this', 'if that',
+            'what should', 'what should we', 'what should i',
+            'which is', 'which are', 'which would', 'which will',
+            'what results', 'what results from', 'what comes', 'what comes next',
+            'what leads', 'what leads to', 'what follows', 'what follows from',
+        ]
+        
+        for pattern in causal_patterns:
+            if pattern in task_lower:
+                return True
+        
+        return False
     def _ensure_node_exists(self, node: str) -> None:
         
         if node not in self.causal_graph:
@@ -534,56 +1226,6 @@ class CRCAAgent(Agent):
         
         return {v: self._destandardize_value(v, z) for v, z in z_pred.items()}
 
-    def _predict_outcomes_cached(
-        self,
-        factual_state: Dict[str, float],
-        interventions: Dict[str, float],
-    ) -> Dict[str, float]:
-        
-        with self._prediction_cache_lock:
-            cache_enabled = self._cache_enabled
-        if not cache_enabled:
-            return self._predict_outcomes(factual_state, interventions)
-
-        state_key = tuple(sorted([(k, float(v)) for k, v in factual_state.items()]))
-        inter_key = tuple(sorted([(k, float(v)) for k, v in interventions.items()]))
-        cache_key = (state_key, inter_key)
-
-        with self._prediction_cache_lock:
-            if cache_key in self._prediction_cache:
-                return dict(self._prediction_cache[cache_key])
-
-        result = self._predict_outcomes(factual_state, interventions)
-
-        with self._prediction_cache_lock:
-            if len(self._prediction_cache_order) >= self._prediction_cache_max:
-                remove_count = max(1, self._prediction_cache_max // 10)
-                for _ in range(remove_count):
-                    old = self._prediction_cache_order.pop(0)
-                    if old in self._prediction_cache:
-                        del self._prediction_cache[old]
-
-            self._prediction_cache_order.append(cache_key)
-            self._prediction_cache[cache_key] = dict(result)
-        return result
-
-    def _get_descendants(self, node: str) -> List[str]:
-        
-        if node not in self.causal_graph:
-            return []
-        stack = [node]
-        visited = set()
-        descendants: List[str] = []
-        while stack:
-            cur = stack.pop()
-            for child in self._get_children(cur):
-                if child in visited:
-                    continue
-                visited.add(child)
-                descendants.append(child)
-                stack.append(child)
-        return descendants
-
     def _predict_z(self, factual_state: Dict[str, float], interventions: Dict[str, float], use_noise: Optional[Dict[str, float]] = None) -> Dict[str, float]:
         
         raw = factual_state.copy()
@@ -639,58 +1281,9 @@ class CRCAAgent(Agent):
 
         return z_pred
 
-    def counterfactual_abduction_action_prediction(
-        self,
-        factual_state: Dict[str, float],
-        interventions: Dict[str, float]
-    ) -> Dict[str, float]:
-        
-        z = self._standardize_state(factual_state)
-
-        z_obs = z  # standardized factual
-        pred_no_noise = self._predict_z(factual_state, {}, use_noise=None)
-        noise: Dict[str, float] = {}
-        for node in pred_no_noise.keys():
-            noise[node] = float(z_obs.get(node, 0.0) - pred_no_noise.get(node, 0.0))
-
-        z_pred = self._predict_z(factual_state, interventions, use_noise=noise)
-        return {v: self._destandardize_value(v, z_val) for v, z_val in z_pred.items()}
-
     def aap(self, factual_state: Dict[str, float], interventions: Dict[str, float]) -> Dict[str, float]:
         
         return self.counterfactual_abduction_action_prediction(factual_state, interventions)
-
-    def detect_confounders(self, treatment: str, outcome: str) -> List[str]:
-        
-        def _ancestors(node: str) -> set:
-            stack = [node]
-            visited = set()
-            while stack:
-                cur = stack.pop()
-                for p in self._get_parents(cur):
-                    if p in visited:
-                        continue
-                    visited.add(p)
-                    stack.append(p)
-            return visited
-
-        if treatment not in self.causal_graph or outcome not in self.causal_graph:
-            return []
-
-        treat_anc = _ancestors(treatment)
-        out_anc = _ancestors(outcome)
-        common = treat_anc.intersection(out_anc)
-        return list(common)
-
-    def identify_adjustment_set(self, treatment: str, outcome: str) -> List[str]:
-        
-        if treatment not in self.causal_graph or outcome not in self.causal_graph:
-            return []
-
-        parents_t = set(self._get_parents(treatment))
-        descendants_t = set(self._get_descendants(treatment))
-        adjustment = [z for z in parents_t if z not in descendants_t and z != outcome]
-        return adjustment
 
     def _predict_outcomes_cached(
         self,
@@ -960,12 +1553,68 @@ class CRCAAgent(Agent):
     def run(
         self,
         task: Optional[Union[str, Any]] = None,
+        img: Optional[str] = None,
+        imgs: Optional[List[str]] = None,
+        correct_answer: Optional[str] = None,
+        streaming_callback: Optional[Any] = None,
+        n: int = 1,
         initial_state: Optional[Any] = None,
         target_variables: Optional[List[str]] = None,
         max_steps: Union[int, str] = 1,
+        *args,
         **kwargs,
-    ) -> Dict[str, Any]:
+    ) -> Union[Dict[str, Any], Any]:
+        """
+        Run the agent with support for both standard Agent features and causal analysis.
         
+        This method maintains compatibility with the parent Agent class while adding
+        causal reasoning capabilities. It routes to causal analysis when appropriate,
+        otherwise delegates to the parent Agent's standard functionality.
+        
+        Args:
+            task: Task string for LLM analysis, or state dict for causal evolution
+            img: Optional image path for vision tasks (delegates to parent)
+            imgs: Optional list of images (delegates to parent)
+            correct_answer: Optional correct answer for validation (delegates to parent)
+            streaming_callback: Optional callback for streaming output (delegates to parent)
+            n: Number of runs (delegates to parent)
+            initial_state: Initial state dictionary for causal evolution
+            target_variables: Target variables for counterfactual analysis
+            max_steps: Maximum evolution steps for causal analysis
+            *args: Additional positional arguments
+            **kwargs: Additional keyword arguments
+            
+        Returns:
+            Dictionary with causal analysis results, or standard Agent output
+        """
+        # Check if this is a causal analysis operation
+        # Criteria: initial_state or target_variables explicitly provided, or task is a dict,
+        # OR automatic detection based on task content
+        is_causal_operation = (
+            initial_state is not None or
+            target_variables is not None or
+            (task is not None and isinstance(task, dict)) or
+            (task is not None and isinstance(task, str) and task.strip().startswith('{')) or
+            self._should_trigger_causal_analysis(task)  # Automatic detection
+        )
+        
+        # Delegate to parent Agent for all standard operations
+        # This includes: images, streaming, handoffs, multiple runs, regular text tasks, etc.
+        # Only use causal analysis if explicitly requested via causal operation indicators
+        if not is_causal_operation:
+            # All standard Agent operations go to parent (handoffs, images, streaming, etc.)
+            return super().run(
+                task=task,
+                img=img,
+                imgs=imgs,
+                correct_answer=correct_answer,
+                streaming_callback=streaming_callback,
+                n=n,
+                *args,
+                **kwargs,
+            )
+        
+        # Causal analysis operations - only when explicitly indicated
         if task is not None and isinstance(task, str) and initial_state is None and not task.strip().startswith('{'):
             return self._run_llm_causal_analysis(task, **kwargs)
         
@@ -1021,32 +1670,510 @@ class CRCAAgent(Agent):
             "steps": effective_steps
         }
 
-    def _run_llm_causal_analysis(self, task: str, **kwargs) -> Dict[str, Any]:
+    def _call_llm_directly(self, prompt: str, system_prompt: Optional[str] = None) -> str:
+        """
+        Call the LLM directly using litellm.completion(), bypassing Agent tool execution.
         
-        self.causal_memory = []
+        This method extracts the model configuration from the Agent and makes a direct
+        API call to get plain text/JSON responses without function calling.
         
+        Args:
+            prompt: The user prompt to send to the LLM
+            system_prompt: Optional system prompt (defaults to Agent's system prompt)
+            
+        Returns:
+            The raw text response from the LLM
+        """
+        try:
+            import litellm
+        except ImportError:
+            raise ImportError("litellm is required for direct LLM calls")
+        
+        # Get model configuration from Agent
+        model_name = getattr(self, 'model_name', 'gpt-4o')
+        api_key = getattr(self, 'llm_api_key', None) or os.getenv('OPENAI_API_KEY')
+        base_url = getattr(self, 'llm_base_url', None)
+        
+        # Get system prompt
+        if system_prompt is None:
+            system_prompt = getattr(self, 'system_prompt', None)
+        
+        # Build messages
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        
+        # Call litellm directly
+        try:
+            response = litellm.completion(
+                model=model_name,
+                messages=messages,
+                api_key=api_key,
+                api_base=base_url,
+                temperature=getattr(self, 'temperature', 0.5),
+                max_tokens=getattr(self, 'max_tokens', 4096),
+            )
+            
+            # Extract text from response
+            if response and hasattr(response, 'choices') and len(response.choices) > 0:
+                content = response.choices[0].message.content
+                return content if content else ""
+            else:
+                logger.warning("Empty response from LLM")
+                return ""
+        except Exception as e:
+            logger.error(f"Error calling LLM directly: {e}")
+            raise
+    
+    def _extract_variables_ml_based(self, task: str) -> bool:
+        """
+        Extract variables using ML/NLP-based approach - use LLM to generate structured output,
+        parse the function call from the response, and automatically invoke the handler.
+        
+        This bypasses unreliable function calling by directly parsing LLM output and
+        invoking the handler programmatically.
+        
+        Args:
+            task: The task string to analyze
+            
+        Returns:
+            True if variables were successfully extracted, False otherwise
+        """
+        import json
+        import re
+        
+        logger.info(f"Starting ML-based variable extraction for task: {task[:100]}...")
+        
+        # Use LLM to generate structured JSON output with variables and edges
+        extraction_prompt = f"""Analyze this task and extract causal variables and relationships.
+
+Task: {task}
+
+Return a JSON object with this exact structure:
+{{
+    "required_variables": ["var1", "var2", "var3"],
+    "causal_edges": [["var1", "var2"], ["var2", "var3"]],
+    "reasoning": "Brief explanation of why these variables are needed",
+    "optional_variables": ["var4"],
+    "counterfactual_variables": ["var1", "var2"]
+}}
+
+Extract ALL relevant variables and causal relationships. Be thorough.
+Return ONLY valid JSON, no other text."""
+
+        try:
+            # Call LLM directly (bypasses Agent tool execution)
+            # This gives us pure text/JSON response without function calling
+            # The LLM is still the core component - we just parse its output programmatically
+            raw_response = self._call_llm_directly(extraction_prompt)
+            
+            extracted_data = None
+            
+            # Parse JSON from LLM text response
+            # The LLM returns plain text with JSON embedded, so we extract it
+            response_text = str(raw_response)
+            
+            # Try to extract JSON from response text
+            json_match = re.search(r'\{[^{}]*"required_variables"[^{}]*\}', response_text, re.DOTALL)
+            if not json_match:
+                # Try to find any JSON object
+                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', response_text, re.DOTALL)
+            
+            if json_match:
+                json_str = json_match.group(0)
+                try:
+                    # Try to fix common JSON issues
+                    # Remove invalid escape sequences
+                    json_str = json_str.replace('\\"', '"').replace("\\'", "'")
+                    # Try parsing
+                    extracted_data = json.loads(json_str)
+                    logger.info("Parsed JSON from text response")
+                except json.JSONDecodeError as e:
+                    # Try to extract just the JSON object more carefully
+                    try:
+                        # Find the innermost complete JSON object
+                        brace_count = 0
+                        start_idx = json_str.find('{')
+                        if start_idx >= 0:
+                            for i in range(start_idx, len(json_str)):
+                                if json_str[i] == '{':
+                                    brace_count += 1
+                                elif json_str[i] == '}':
+                                    brace_count -= 1
+                                    if brace_count == 0:
+                                        json_str = json_str[start_idx:i+1]
+                                        extracted_data = json.loads(json_str)
+                                        logger.info("Parsed JSON after fixing structure")
+                                        break
+                    except (json.JSONDecodeError, ValueError) as e2:
+                        logger.warning(f"Failed to parse JSON after fixes: {e2}")
+                        logger.debug(f"JSON string was: {json_str[:500]}")
+            
+            # Process extracted data
+            if extracted_data:
+                # Validate structure
+                required_vars = extracted_data.get("required_variables", [])
+                causal_edges = extracted_data.get("causal_edges", [])
+                reasoning = extracted_data.get("reasoning", "Extracted from task analysis")
+                optional_vars = extracted_data.get("optional_variables", [])
+                counterfactual_vars = extracted_data.get("counterfactual_variables", [])
+                
+                if required_vars and causal_edges:
+                    # Automatically invoke the handler with extracted data
+                    logger.info(f"Extracted {len(required_vars)} variables, {len(causal_edges)} edges via ML")
+                    result = self._extract_causal_variables_handler(
+                        required_variables=required_vars,
+                        causal_edges=causal_edges,
+                        reasoning=reasoning,
+                        optional_variables=optional_vars if optional_vars else None,
+                        counterfactual_variables=counterfactual_vars if counterfactual_vars else None,
+                    )
+                    
+                    # Check if extraction was successful
+                    if result.get("status") == "success" and result.get("summary", {}).get("variables_added", 0) > 0:
+                        logger.info(f"ML-based extraction successful: {result.get('summary')}")
+                        return True
+                    else:
+                        logger.warning(f"ML-based extraction returned: {result}")
+                else:
+                    logger.warning(f"Extracted data missing required fields. required_variables: {required_vars}, causal_edges: {causal_edges}")
+            else:
+                logger.warning("Could not extract data from LLM response")
+                logger.debug(f"Raw response type: {type(raw_response)}, value: {str(raw_response)[:500]}")
+                
+        except Exception as e:
+            logger.error(f"Error in ML-based extraction: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+        
+        return len(self.causal_graph) > 0
+
+    def _generate_causal_analysis_ml_based(self, task: str) -> Optional[Dict[str, Any]]:
+        """
+        Generate causal analysis using ML-based approach - use LLM to generate structured output,
+        parse the function call from the response, and automatically invoke the handler.
+        
+        This bypasses unreliable function calling by directly parsing LLM output and
+        invoking the handler programmatically.
+        
+        Args:
+            task: The task string to analyze
+            
+        Returns:
+            Dictionary with causal analysis results, or None if extraction failed
+        """
+        import json
+        import re
+        
+        logger.info(f"Starting ML-based causal analysis generation for task: {task[:100]}...")
+        
+        # Build comprehensive causal analysis prompt
         causal_prompt = self._build_causal_prompt(task)
         
-        max_loops = self.causal_max_loops if isinstance(self.causal_max_loops, int) else 3
-        for i in range(max_loops):
-            step_result = self.step(causal_prompt)
-            self.causal_memory.append({
-                'step': i + 1,
-                'analysis': step_result,
-                'timestamp': i
-            })
+        # Add instruction for structured output
+        analysis_prompt = f"""{causal_prompt}
+
+CRITICAL: You must return a JSON object with this EXACT structure. Do not include any text before or after the JSON.
+
+Required JSON format:
+{{
+    "causal_analysis": "Detailed analysis of causal relationships and mechanisms. This must be a comprehensive text explanation.",
+    "intervention_planning": "Planned interventions to test causal hypotheses.",
+    "counterfactual_scenarios": [
+        {{
+            "scenario_name": "Scenario 1",
+            "interventions": {{"var1": 10, "var2": 20}},
+            "expected_outcomes": {{"target_var": 30}},
+            "reasoning": "Why this scenario is important..."
+        }}
+    ],
+    "causal_strength_assessment": "Assessment of relationship strengths and confounders.",
+    "optimal_solution": "Recommended solution based on analysis."
+}}
+
+IMPORTANT: 
+- The "causal_analysis" field is REQUIRED and must contain detailed text analysis
+- Return ONLY the JSON object, no markdown, no code blocks, no explanations
+- Ensure all fields are present and properly formatted"""
+
+        try:
+            # Call LLM directly (bypasses Agent tool execution)
+            # This gives us pure text/JSON response without function calling
+            # The LLM is still the core component - we just parse its output programmatically
+            raw_response = self._call_llm_directly(analysis_prompt)
             
-            if i < max_loops - 1:
-                memory_context = self._build_memory_context()
-                causal_prompt = f"{causal_prompt}\n\nPrevious Analysis:\n{memory_context}"
+            extracted_data = None
+            
+            # Parse JSON from LLM text response
+            # The LLM returns plain text with JSON embedded, so we extract it
+            response_text = str(raw_response)
+            
+            # First, try to extract JSON from markdown code blocks (```json ... ```)
+            json_block_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+            if json_block_match:
+                json_str = json_block_match.group(1)
+                try:
+                    extracted_data = json.loads(json_str)
+                    logger.info("Parsed JSON from markdown code block")
+                except json.JSONDecodeError:
+                    pass
+            
+            # If not found in code block, try to extract JSON directly
+            if not extracted_data:
+                # Try to find JSON object with causal_analysis field
+                json_match = re.search(r'\{[^{}]*"causal_analysis"[^{}]*\}', response_text, re.DOTALL)
+                if not json_match:
+                    # Try to find any complete JSON object (handle nested objects)
+                    # This regex finds the outermost complete JSON object
+                    brace_count = 0
+                    start_idx = response_text.find('{')
+                    if start_idx >= 0:
+                        for i in range(start_idx, len(response_text)):
+                            if response_text[i] == '{':
+                                brace_count += 1
+                            elif response_text[i] == '}':
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    json_str = response_text[start_idx:i+1]
+                                    try:
+                                        # Try to fix common JSON issues
+                                        json_str = json_str.replace('\\"', '"').replace("\\'", "'")
+                                        extracted_data = json.loads(json_str)
+                                        logger.info("Parsed JSON from text response")
+                                        break
+                                    except json.JSONDecodeError:
+                                        # Try without the escape fixes
+                                        try:
+                                            extracted_data = json.loads(response_text[start_idx:i+1])
+                                            logger.info("Parsed JSON after removing escape fixes")
+                                            break
+                                        except json.JSONDecodeError as e:
+                                            logger.debug(f"Failed to parse JSON: {e}")
+                                            break
+            
+            # Process extracted data
+            if extracted_data:
+                # Validate structure - try multiple possible field names
+                causal_analysis = (
+                    extracted_data.get("causal_analysis", "") or
+                    extracted_data.get("analysis", "") or
+                    extracted_data.get("causal_analysis_text", "") or
+                    str(extracted_data.get("analysis_text", ""))
+                )
+                intervention_planning = extracted_data.get("intervention_planning", "") or extracted_data.get("interventions", "")
+                counterfactual_scenarios = extracted_data.get("counterfactual_scenarios", []) or extracted_data.get("scenarios", [])
+                causal_strength_assessment = extracted_data.get("causal_strength_assessment", "") or extracted_data.get("strength_assessment", "")
+                optimal_solution = extracted_data.get("optimal_solution", "") or extracted_data.get("solution", "")
+                
+                # Log what we extracted for debugging (use INFO so it's visible)
+                logger.info(f"Extracted fields - causal_analysis: {bool(causal_analysis)}, scenarios: {len(counterfactual_scenarios)}")
+                logger.info(f"Extracted data keys: {list(extracted_data.keys())}")
+                if not causal_analysis:
+                    # Log the full structure to see what we got
+                    logger.info(f"Full extracted data (first 1000 chars): {str(extracted_data)[:1000]}")
+                
+                if causal_analysis:
+                    # Automatically invoke the handler with extracted data
+                    logger.info(f"Extracted causal analysis via ML ({len(causal_analysis)} chars, {len(counterfactual_scenarios)} scenarios)")
+                    result = self._generate_causal_analysis_handler(
+                        causal_analysis=causal_analysis,
+                        intervention_planning=intervention_planning,
+                        counterfactual_scenarios=counterfactual_scenarios,
+                        causal_strength_assessment=causal_strength_assessment,
+                        optimal_solution=optimal_solution,
+                    )
+                    
+                    # Check if analysis was successful
+                    if result.get("status") == "success":
+                        logger.info(f"ML-based causal analysis generation successful")
+                        # Return the analysis data for use in final result
+                        return {
+                            'causal_analysis': causal_analysis,
+                            'intervention_planning': intervention_planning,
+                            'counterfactual_scenarios': counterfactual_scenarios,
+                            'causal_strength_assessment': causal_strength_assessment,
+                            'optimal_solution': optimal_solution,
+                        }
+                    else:
+                        logger.warning(f"ML-based analysis returned: {result}")
+                else:
+                    logger.warning("Extracted data missing causal_analysis field")
+                    logger.info(f"Extracted data structure: {extracted_data}")
+                    logger.info(f"Available keys: {list(extracted_data.keys()) if isinstance(extracted_data, dict) else 'Not a dict'}")
+                    # Try to use the raw response text as causal_analysis if JSON parsing failed
+                    if not extracted_data or not isinstance(extracted_data, dict):
+                        logger.info("Attempting to use raw response as causal analysis")
+                        # Use the raw response as a fallback
+                        causal_analysis = response_text[:5000]  # Limit length
+                        if causal_analysis:
+                            result = self._generate_causal_analysis_handler(
+                                causal_analysis=causal_analysis,
+                                intervention_planning="",
+                                counterfactual_scenarios=[],
+                                causal_strength_assessment="",
+                                optimal_solution="",
+                            )
+                            if result.get("status") == "success":
+                                return {
+                                    'causal_analysis': causal_analysis,
+                                    'intervention_planning': "",
+                                    'counterfactual_scenarios': [],
+                                    'causal_strength_assessment': "",
+                                    'optimal_solution': "",
+                                }
+            else:
+                logger.warning("Could not extract data from LLM response for causal analysis")
+                logger.debug(f"Raw response type: {type(raw_response)}, value: {str(raw_response)[:500]}")
+                
+        except Exception as e:
+            logger.error(f"Error in ML-based causal analysis generation: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
         
-        final_analysis = self._synthesize_causal_analysis(task)
+        return None
+
+    def _extract_variables_from_task(self, task: str) -> bool:
+        """
+        Extract variables and causal relationships from a task.
+        
+        Uses ML-based extraction (structured LLM output + automatic handler invocation)
+        instead of relying on unreliable function calling.
+        
+        Args:
+            task: The task string to analyze
+            
+        Returns:
+            True if variables were successfully extracted, False otherwise
+        """
+        # Use ML-based extraction (more reliable than function calling)
+        return self._extract_variables_ml_based(task)
+
+    def _run_llm_causal_analysis(self, task: str, target_variables: Optional[List[str]] = None, **kwargs) -> Dict[str, Any]:
+        """
+        Run LLM-based causal analysis on a task.
+        
+        Args:
+            task: Task string to analyze
+            target_variables: Optional list of target variables for counterfactual scenarios.
+                            If None, uses all variables in the causal graph.
+            **kwargs: Additional arguments
+            
+        Returns:
+            Dictionary with causal analysis results
+        """
+        self.causal_memory = []
+        
+        # Check if causal graph is empty - if so, trigger variable extraction
+        if len(self.causal_graph) == 0:
+            logger.info("Causal graph is empty, starting variable extraction phase...")
+            extraction_success = self._extract_variables_from_task(task)
+            
+            if not extraction_success:
+                # Extraction failed, return error
+                return {
+                    'task': task,
+                    'error': 'Variable extraction failed',
+                    'message': (
+                        'Could not extract variables from the task. '
+                        'Please ensure the task describes causal relationships or variables, '
+                        'or manually initialize the agent with variables and causal_edges.'
+                    ),
+                    'causal_graph_info': {
+                        'nodes': [],
+                        'edges': [],
+                        'is_dag': True
+                    }
+                }
+            
+            logger.info(
+                f"Variable extraction completed. "
+                f"Graph now has {len(self.causal_graph)} variables and "
+                f"{sum(len(children) for children in self.causal_graph.values())} edges."
+            )
+        
+        # Use Agent's normal run method to get rich output and proper loop handling
+        # This will show the LLM's rich output and respect max_loops
+        causal_prompt = self._build_causal_prompt(task)
+        
+        # Store the current memory size before running to detect new entries
+        memory_size_before = len(self.causal_memory)
+        
+        # Run the agent - this will execute tools and store results in causal_memory
+        super().run(task=causal_prompt)
+        
+        # Extract the causal analysis from causal_memory (stored by tool handler)
+        # Look for the most recent analysis entry
+        analysis_result = None
+        final_analysis = ""
+        
+        # Search backwards through causal_memory for the most recent analysis
+        # Check both new entries (after memory_size_before) and all entries
+        for entry in reversed(self.causal_memory):
+            if isinstance(entry, dict):
+                # Check if this is an analysis entry (has 'type' == 'analysis' or has 'causal_analysis' field)
+                entry_type = entry.get('type')
+                has_causal_analysis = 'causal_analysis' in entry
+                
+                if entry_type == 'analysis' or has_causal_analysis:
+                    analysis_result = entry
+                    final_analysis = entry.get('causal_analysis', '')
+                    if final_analysis:
+                        logger.info(f"Found causal analysis in memory (type: {entry_type}, length: {len(final_analysis)})")
+                        break
+        
+        # If no analysis found in memory, use the LLM's response as fallback
+        if not final_analysis:
+            logger.warning("No causal analysis found in causal_memory, attempting fallback from conversation history")
+            # Try to get the last response from the conversation
+            if hasattr(self, 'short_memory') and self.short_memory:
+                # Conversation object has conversation_history attribute, not get_messages()
+                if hasattr(self.short_memory, 'conversation_history'):
+                    conversation_history = self.short_memory.conversation_history
+                    if conversation_history:
+                        # Get the last assistant message
+                        for msg in reversed(conversation_history):
+                            if isinstance(msg, dict) and msg.get('role') == 'assistant':
+                                final_analysis = msg.get('content', '')
+                                if final_analysis:
+                                    logger.info(f"Extracted causal analysis from conversation history (length: {len(final_analysis)})")
+                                break
+                            elif hasattr(msg, 'role') and msg.role == 'assistant':
+                                final_analysis = getattr(msg, 'content', str(msg))
+                                if final_analysis:
+                                    logger.info(f"Extracted causal analysis from conversation history (length: {len(final_analysis)})")
+                                break
+        
+        if not final_analysis:
+            logger.warning(f"Could not extract causal analysis. Memory size: {len(self.causal_memory)} (was {memory_size_before})")
         
         default_state = {var: 0.0 for var in self.get_nodes()}
         self.ensure_standardization_stats(default_state)
-        counterfactual_scenarios = self.generate_counterfactual_scenarios(
-            default_state,
-            self.get_nodes()[:5],  # Top 5 variables
+        
+        # Use provided target_variables or default to all variables
+        if target_variables is None:
+            target_variables = self.get_nodes()
+        
+        # Limit to top variables if too many
+        target_vars = target_variables[:5] if len(target_variables) > 5 else target_variables
+        
+        # Use counterfactual scenarios from ML analysis if available
+        if analysis_result and isinstance(analysis_result, dict):
+            ml_scenarios = analysis_result.get('counterfactual_scenarios', [])
+            if ml_scenarios:
+                counterfactual_scenarios = ml_scenarios
+            else:
+                # Fallback to generated scenarios
+                counterfactual_scenarios = self.generate_counterfactual_scenarios(
+                    default_state,
+                    target_vars,
+                    max_scenarios=5
+                )
+        else:
+            # Fallback to generated scenarios
+            counterfactual_scenarios = self.generate_counterfactual_scenarios(
+                default_state,
+                target_vars,
             max_scenarios=5
         )
         
@@ -1059,7 +2186,10 @@ class CRCAAgent(Agent):
                 'edges': self.get_edges(),
                 'is_dag': self.is_dag()
             },
-            'analysis_steps': self.causal_memory
+            'analysis_steps': self.causal_memory,
+            'intervention_planning': analysis_result.get('intervention_planning', '') if analysis_result else '',
+            'causal_strength_assessment': analysis_result.get('causal_strength_assessment', '') if analysis_result else '',
+            'optimal_solution': analysis_result.get('optimal_solution', '') if analysis_result else '',
         }
 
     # =========================
@@ -1965,6 +3095,140 @@ class CRCAAgent(Agent):
     ) -> Dict[str, Any]:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, lambda: self.vector_autoregression_estimation(df=df, variables=variables, max_lag=max_lag))
+
+    # =========================
+    # Excel TUI Integration Methods
+    # =========================
+    
+    def _initialize_excel_tables(self) -> None:
+        """Initialize standard Excel tables."""
+        if not self._excel_enabled or self._excel_tables is None:
+            return
+        
+        try:
+            from crca_excel.core.standard_tables import initialize_standard_tables
+            initialize_standard_tables(self._excel_tables)
+        except Exception as e:
+            logger.error(f"Error initializing standard tables: {e}")
+    
+    def _link_causal_graph_to_tables(self) -> None:
+        """Link CRCA causal graph to Excel tables."""
+        if not self._excel_enabled or self._excel_scm_bridge is None:
+            return
+        
+        try:
+            self._excel_scm_bridge.link_causal_graph_to_tables(self.causal_graph)
+        except Exception as e:
+            logger.error(f"Error linking causal graph to tables: {e}")
+    
+    def excel_edit_cell(self, table_name: str, row_key: Any, column_name: str, value: Any) -> None:
+        """
+        Edit a cell in Excel tables and trigger recomputation.
+        
+        Args:
+            table_name: Table name
+            row_key: Row key
+            column_name: Column name
+            value: Value to set
+        """
+        if not self._excel_enabled or self._excel_tables is None:
+            raise RuntimeError("Excel TUI not enabled")
+        
+        self._excel_tables.set_cell(table_name, row_key, column_name, value)
+        
+        # Trigger recomputation
+        if self._excel_eval_engine:
+            self._excel_eval_engine.recompute_dirty_cells()
+    
+    def excel_apply_plan(self, plan: Dict[Tuple[str, Any, str], Any]) -> Dict[str, Any]:
+        """
+        Apply a plan (set of interventions) to Excel tables.
+        
+        Args:
+            plan: Dictionary of (table_name, row_key, column_name) -> value
+            
+        Returns:
+            Dictionary with results
+        """
+        if not self._excel_enabled or self._excel_scm_bridge is None:
+            raise RuntimeError("Excel TUI not enabled")
+        
+        # Convert plan format
+        interventions = {
+            (table_name, row_key, column_name): value
+            for (table_name, row_key, column_name), value in plan.items()
+        }
+        
+        snapshot = self._excel_scm_bridge.do_intervention(interventions)
+        
+        return {
+            "snapshot": snapshot,
+            "success": True
+        }
+    
+    def excel_generate_scenarios(
+        self,
+        base_interventions: Dict[Tuple[str, Any, str], Any],
+        target_variables: List[Tuple[str, Any, str]],
+        n_scenarios: int = 10
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate counterfactual scenarios.
+        
+        Args:
+            base_interventions: Base intervention set
+            target_variables: Variables to vary
+            n_scenarios: Number of scenarios
+            
+        Returns:
+            List of scenario dictionaries
+        """
+        if not self._excel_enabled or self._excel_scm_bridge is None:
+            raise RuntimeError("Excel TUI not enabled")
+        
+        # Convert format
+        base_interv = {
+            (table_name, row_key, column_name): value
+            for (table_name, row_key, column_name), value in base_interventions.items()
+        }
+        target_vars = [
+            (table_name, row_key, column_name)
+            for (table_name, row_key, column_name) in target_variables
+        ]
+        
+        return self._excel_scm_bridge.generate_counterfactual_scenarios(
+            base_interv,
+            target_vars,
+            n_scenarios=n_scenarios,
+            seed=self.seed
+        )
+    
+    def excel_get_table(self, table_name: str):
+        """
+        Get an Excel table.
+        
+        Args:
+            table_name: Table name
+            
+        Returns:
+            Table instance or None
+        """
+        if not self._excel_enabled or self._excel_tables is None:
+            return None
+        
+        return self._excel_tables.get_table(table_name)
+    
+    def excel_get_all_tables(self):
+        """
+        Get all Excel tables.
+        
+        Returns:
+            Dictionary of table_name -> Table
+        """
+        if not self._excel_enabled or self._excel_tables is None:
+            return {}
+        
+        return self._excel_tables.get_all_tables()
 
 
 
