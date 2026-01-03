@@ -14,7 +14,7 @@ import os
 import threading
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 # Third-party imports
 import numpy as np
@@ -70,6 +70,16 @@ try:
 except ImportError:
     # Fallback if prompt file doesn't exist
     DEFAULT_CRCA_SYSTEM_PROMPT = None
+
+# Policy engine imports (optional - only if policy_mode is enabled)
+try:
+    from schemas.policy import DoctrineV1
+    from utils.ledger import Ledger
+    from templates.policy_loop import PolicyLoopMixin
+    POLICY_ENGINE_AVAILABLE = True
+except ImportError:
+    POLICY_ENGINE_AVAILABLE = False
+    logger.debug("Policy engine modules not available")
 
 # Fix litellm async compatibility
 try:
@@ -145,6 +155,10 @@ class CounterfactualScenario:
         expected_outcomes: Dictionary mapping variable names to expected outcomes
         probability: Probability of this scenario (default: 1.0)
         reasoning: Explanation of why this scenario is important
+        uncertainty_metadata: Optional metadata about prediction confidence, graph uncertainty, scenario relevance
+        sampling_distribution: Optional distribution type used for sampling (gaussian/uniform/mixture/adaptive)
+        monte_carlo_iterations: Optional number of Monte Carlo samples used
+        meta_reasoning_score: Optional overall quality/informativeness score
     """
     
     name: str
@@ -152,6 +166,541 @@ class CounterfactualScenario:
     expected_outcomes: Dict[str, float]
     probability: float = 1.0
     reasoning: str = ""
+    uncertainty_metadata: Optional[Dict[str, Any]] = None
+    sampling_distribution: Optional[str] = None
+    monte_carlo_iterations: Optional[int] = None
+    meta_reasoning_score: Optional[float] = None
+
+
+# Internal helper classes for meta-Monte Carlo counterfactual reasoning
+class _AdaptiveInterventionSampler:
+    """Adaptive intervention sampler based on causal graph structure."""
+    
+    def __init__(self, agent: 'CRCAAgent'):
+        """Initialize sampler with reference to agent.
+        
+        Args:
+            agent: CRCAAgent instance for accessing causal graph and stats
+        """
+        self.agent = agent
+    
+    def sample_interventions(
+        self,
+        factual_state: Dict[str, float],
+        target_variables: List[str],
+        n_samples: int
+    ) -> List[Dict[str, float]]:
+        """Sample interventions using adaptive distributions.
+        
+        Args:
+            factual_state: Current factual state
+            target_variables: Variables to sample interventions for
+            n_samples: Number of samples to generate
+            
+        Returns:
+            List of intervention dictionaries
+        """
+        samples = []
+        rng = np.random.default_rng(self.agent.seed if self.agent.seed is not None else None)
+        
+        for _ in range(n_samples):
+            intervention = {}
+            for var in target_variables:
+                dist_type, params = self._get_adaptive_distribution(var, factual_state)
+                
+                if dist_type == "gaussian":
+                    val = self._sample_gaussian(var, params["mean"], params["std"], 1, rng)[0]
+                elif dist_type == "uniform":
+                    val = self._sample_uniform(var, params["bounds"], 1, rng)[0]
+                elif dist_type == "mixture":
+                    val = self._sample_mixture(var, params["components"], 1, rng)[0]
+                else:  # adaptive/graph-based
+                    val = self._sample_from_graph_structure(var, factual_state, 1, rng)[0]
+                
+                intervention[var] = float(val)
+            
+            samples.append(intervention)
+        
+        return samples
+    
+    def _get_adaptive_distribution(
+        self,
+        var: str,
+        factual_state: Dict[str, float]
+    ) -> Tuple[str, Dict[str, Any]]:
+        """Select distribution type based on graph structure.
+        
+        Args:
+            var: Variable name
+            factual_state: Current factual state
+            
+        Returns:
+            Tuple of (distribution_type, parameters)
+        """
+        # Get edge strengths and confidence
+        parents = self.agent._get_parents(var)
+        children = self.agent._get_children(var)
+        
+        # Calculate average edge strength
+        avg_strength = 0.0
+        avg_confidence = 1.0
+        if parents:
+            strengths = [abs(self.agent._edge_strength(p, var)) for p in parents]
+            confidences = []
+            for p in parents:
+                edge = self.agent.causal_graph.get(p, {}).get(var, {})
+                if isinstance(edge, dict):
+                    confidences.append(edge.get("confidence", 1.0))
+                else:
+                    confidences.append(1.0)
+            avg_strength = sum(strengths) / len(strengths) if strengths else 0.0
+            avg_confidence = sum(confidences) / len(confidences) if confidences else 1.0
+        
+        # Get path length (max depth from root)
+        path_length = self._get_max_path_length(var)
+        
+        # Get variable importance (number of descendants)
+        importance = len(self.agent._get_descendants(var))
+        
+        # Get stats
+        stats = self.agent.standardization_stats.get(var, {"mean": 0.0, "std": 1.0})
+        mean = stats.get("mean", 0.0)
+        std = stats.get("std", 1.0) or 1.0
+        factual_val = factual_state.get(var, mean)
+        
+        # Decision logic
+        if avg_confidence > 0.8 and avg_strength > 0.5:
+            # High confidence + strong edges -> narrow Gaussian
+            return "gaussian", {
+                "mean": factual_val,
+                "std": std * 0.3  # Narrow distribution
+            }
+        elif avg_confidence < 0.5:
+            # Low confidence -> wide uniform or mixture
+            if path_length > 3:
+                return "mixture", {
+                    "components": [
+                        {"type": "gaussian", "mean": factual_val, "std": std * 1.5, "weight": 0.5},
+                        {"type": "uniform", "bounds": (factual_val - 3*std, factual_val + 3*std), "weight": 0.5}
+                    ]
+                }
+            else:
+                return "uniform", {
+                    "bounds": (factual_val - 2*std, factual_val + 2*std)
+                }
+        elif path_length > 4:
+            # Long causal paths -> mixture to capture path uncertainty
+            return "mixture", {
+                "components": [
+                    {"type": "gaussian", "mean": factual_val, "std": std * 0.8, "weight": 0.7},
+                    {"type": "uniform", "bounds": (factual_val - 2*std, factual_val + 2*std), "weight": 0.3}
+                ]
+            }
+        elif len(parents) > 3:
+            # Many parents -> mixture to capture multi-parent uncertainty
+            return "mixture", {
+                "components": [
+                    {"type": "gaussian", "mean": factual_val, "std": std * 0.6, "weight": 0.6},
+                    {"type": "uniform", "bounds": (factual_val - 2*std, factual_val + 2*std), "weight": 0.4}
+                ]
+            }
+        elif len(parents) == 0:
+            # Exogenous variable -> uniform
+            return "uniform", {
+                "bounds": (factual_val - 2*std, factual_val + 2*std)
+            }
+        else:
+            # Default: adaptive based on graph structure
+            return "adaptive", {
+                "mean": factual_val,
+                "std": std,
+                "edge_strength": avg_strength,
+                "confidence": avg_confidence,
+                "path_length": path_length
+            }
+    
+    def _get_max_path_length(self, var: str) -> int:
+        """Get maximum path length from root to variable."""
+        def dfs(node: str, visited: set, depth: int) -> int:
+            if node in visited:
+                return depth
+            visited.add(node)
+            parents = self.agent._get_parents(node)
+            if not parents:
+                return depth
+            return max([dfs(p, visited.copy(), depth + 1) for p in parents] + [depth])
+        
+        return dfs(var, set(), 0)
+    
+    def _sample_gaussian(
+        self,
+        var: str,
+        mean: float,
+        std: float,
+        n: int,
+        rng: np.random.Generator
+    ) -> List[float]:
+        """Sample from Gaussian distribution."""
+        return [float(x) for x in rng.normal(mean, std, n)]
+    
+    def _sample_uniform(
+        self,
+        var: str,
+        bounds: Tuple[float, float],
+        n: int,
+        rng: np.random.Generator
+    ) -> List[float]:
+        """Sample from uniform distribution."""
+        low, high = bounds
+        return [float(x) for x in rng.uniform(low, high, n)]
+    
+    def _sample_mixture(
+        self,
+        var: str,
+        components: List[Dict[str, Any]],
+        n: int,
+        rng: np.random.Generator
+    ) -> List[float]:
+        """Sample from mixture distribution."""
+        samples = []
+        for _ in range(n):
+            # Select component based on weights
+            weights = [c.get("weight", 1.0/len(components)) for c in components]
+            total_weight = sum(weights)
+            probs = [w / total_weight for w in weights]
+            component_idx = rng.choice(len(components), p=probs)
+            component = components[component_idx]
+            
+            if component["type"] == "gaussian":
+                val = rng.normal(component["mean"], component["std"])
+            else:  # uniform
+                low, high = component["bounds"]
+                val = rng.uniform(low, high)
+            
+            samples.append(float(val))
+        
+        return samples
+    
+    def _sample_from_graph_structure(
+        self,
+        var: str,
+        factual_state: Dict[str, float],
+        n: int,
+        rng: np.random.Generator
+    ) -> List[float]:
+        """Sample using graph structure information."""
+        stats = self.agent.standardization_stats.get(var, {"mean": 0.0, "std": 1.0})
+        mean = stats.get("mean", 0.0)
+        std = stats.get("std", 1.0) or 1.0
+        factual_val = factual_state.get(var, mean)
+        
+        # Use graph-based adaptive std
+        parents = self.agent._get_parents(var)
+        if parents:
+            avg_strength = sum([abs(self.agent._edge_strength(p, var)) for p in parents]) / len(parents)
+            # Stronger edges -> narrower distribution
+            adaptive_std = std * (1.0 - 0.5 * min(1.0, avg_strength))
+        else:
+            adaptive_std = std * 1.5  # Wider for exogenous
+        
+        return self._sample_gaussian(var, factual_val, adaptive_std, n, rng)
+
+
+class _GraphUncertaintySampler:
+    """Sample graph variations for uncertainty quantification."""
+    
+    def __init__(self, agent: 'CRCAAgent'):
+        """Initialize sampler with reference to agent.
+        
+        Args:
+            agent: CRCAAgent instance for accessing causal graph
+        """
+        self.agent = agent
+    
+    def sample_graph_variations(
+        self,
+        n_samples: int,
+        uncertainty_data: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[Tuple[str, str], float]]:
+        """Sample alternative graph structures.
+        
+        Args:
+            n_samples: Number of graph variations to sample
+            uncertainty_data: Optional uncertainty data from quantify_uncertainty()
+            
+        Returns:
+            List of graph variation dictionaries mapping (source, target) -> strength
+        """
+        variations = []
+        rng = np.random.default_rng(self.agent.seed if self.agent.seed is not None else None)
+        
+        # Get baseline strengths
+        baseline_strengths: Dict[Tuple[str, str], float] = {}
+        for u, targets in self.agent.causal_graph.items():
+            for v, meta in targets.items():
+                try:
+                    baseline_strengths[(u, v)] = float(meta.get("strength", 0.0)) if isinstance(meta, dict) else float(meta)
+                except Exception:
+                    baseline_strengths[(u, v)] = 0.0
+        
+        # Get confidence intervals if available
+        edge_cis = {}
+        if uncertainty_data and "edge_cis" in uncertainty_data:
+            edge_cis = uncertainty_data["edge_cis"]
+        
+        for _ in range(n_samples):
+            variation = {}
+            for (u, v), baseline_strength in baseline_strengths.items():
+                edge_key = f"{u}->{v}"
+                if edge_key in edge_cis:
+                    # Sample from confidence interval
+                    ci_lower, ci_upper = edge_cis[edge_key]
+                    # Use truncated normal within CI
+                    mean = (ci_lower + ci_upper) / 2.0
+                    std = (ci_upper - ci_lower) / 4.0  # Approximate std from CI
+                    sampled = rng.normal(mean, std)
+                    # Truncate to CI bounds
+                    sampled = max(ci_lower, min(ci_upper, sampled))
+                else:
+                    # Sample around baseline with small perturbation
+                    edge = self.agent.causal_graph.get(u, {}).get(v, {})
+                    confidence = edge.get("confidence", 1.0) if isinstance(edge, dict) else 1.0
+                    # Lower confidence -> larger perturbation
+                    perturbation_std = 0.1 * (2.0 - confidence)
+                    sampled = baseline_strength + rng.normal(0.0, perturbation_std)
+                
+                variation[(u, v)] = float(sampled)
+            
+            variations.append(variation)
+        
+        return variations
+
+
+class _PredictionQualityAssessor:
+    """Assess quality and reliability of counterfactual predictions."""
+    
+    def __init__(self, agent: 'CRCAAgent'):
+        """Initialize assessor with reference to agent.
+        
+        Args:
+            agent: CRCAAgent instance for accessing causal graph
+        """
+        self.agent = agent
+    
+    def assess_quality(
+        self,
+        predictions_across_variants: List[Dict[str, float]],
+        factual_state: Dict[str, float],
+        interventions: Dict[str, float]
+    ) -> Tuple[float, Dict[str, Any]]:
+        """Evaluate prediction reliability.
+        
+        Args:
+            predictions_across_variants: List of predictions from different graph variants
+            factual_state: Original factual state
+            interventions: Applied interventions
+            
+        Returns:
+            Tuple of (quality_score, detailed_metrics)
+        """
+        if not predictions_across_variants:
+            return 0.0, {}
+        
+        # Calculate consistency (variance across variants)
+        all_vars = set()
+        for pred in predictions_across_variants:
+            all_vars.update(pred.keys())
+        
+        consistency_scores = {}
+        for var in all_vars:
+            values = [pred.get(var, 0.0) for pred in predictions_across_variants]
+            if len(values) > 1:
+                variance = float(np.var(values))
+                std = float(np.std(values))
+                mean_val = float(np.mean(values))
+                # Consistency: lower variance = higher consistency
+                # Normalize by mean to get coefficient of variation
+                cv = std / abs(mean_val) if abs(mean_val) > 1e-6 else std
+                consistency_scores[var] = {
+                    "variance": variance,
+                    "std": std,
+                    "mean": mean_val,
+                    "coefficient_of_variation": cv,
+                    "consistency": max(0.0, 1.0 - min(1.0, cv))  # 1.0 = perfect consistency
+                }
+            else:
+                consistency_scores[var] = {
+                    "variance": 0.0,
+                    "std": 0.0,
+                    "mean": values[0] if values else 0.0,
+                    "coefficient_of_variation": 0.0,
+                    "consistency": 1.0
+                }
+        
+        # Calculate confidence based on edge strengths and path lengths
+        confidence_scores = {}
+        for var in all_vars:
+            # Get path from intervention variables to this variable
+            max_path_strength = 0.0
+            min_path_length = float('inf')
+            
+            for interv_var in interventions.keys():
+                path = self.agent.identify_causal_chain(interv_var, var)
+                if path:
+                    path_length = len(path) - 1
+                    min_path_length = min(min_path_length, path_length)
+                    
+                    # Calculate path strength (product of edge strengths)
+                    path_strength = 1.0
+                    for i in range(len(path) - 1):
+                        u, v = path[i], path[i + 1]
+                        edge_strength = abs(self.agent._edge_strength(u, v))
+                        path_strength *= edge_strength
+                    max_path_strength = max(max_path_strength, path_strength)
+            
+            # Confidence: higher path strength, shorter path = higher confidence
+            path_confidence = max_path_strength * (1.0 / (1.0 + min_path_length * 0.1))
+            confidence_scores[var] = {
+                "path_strength": max_path_strength,
+                "path_length": min_path_length if min_path_length != float('inf') else 0,
+                "confidence": float(path_confidence)
+            }
+        
+        # Calculate sensitivity (how much predictions change with small graph perturbations)
+        sensitivity_scores = {}
+        if len(predictions_across_variants) > 1:
+            baseline_pred = predictions_across_variants[0]
+            for var in all_vars:
+                baseline_val = baseline_pred.get(var, 0.0)
+                perturbations = [abs(pred.get(var, 0.0) - baseline_val) for pred in predictions_across_variants[1:]]
+                avg_perturbation = float(np.mean(perturbations)) if perturbations else 0.0
+                max_perturbation = float(max(perturbations)) if perturbations else 0.0
+                
+                # Sensitivity: lower perturbation = lower sensitivity = better
+                sensitivity_scores[var] = {
+                    "avg_perturbation": avg_perturbation,
+                    "max_perturbation": max_perturbation,
+                    "sensitivity": min(1.0, avg_perturbation / (abs(baseline_val) + 1e-6))
+                }
+        
+        # Overall quality score: weighted combination
+        overall_quality = 0.0
+        if consistency_scores and confidence_scores:
+            consistency_avg = float(np.mean([s["consistency"] for s in consistency_scores.values()]))
+            confidence_avg = float(np.mean([s["confidence"] for s in confidence_scores.values()]))
+            
+            # Weight: consistency 40%, confidence 60%
+            overall_quality = 0.4 * consistency_avg + 0.6 * confidence_avg
+        
+        metrics = {
+            "consistency": consistency_scores,
+            "confidence": confidence_scores,
+            "sensitivity": sensitivity_scores,
+            "overall_quality": overall_quality
+        }
+        
+        return overall_quality, metrics
+
+
+class _MetaReasoningAnalyzer:
+    """Analyze scenarios for meta-level reasoning about informativeness."""
+    
+    def __init__(self, agent: 'CRCAAgent'):
+        """Initialize analyzer with reference to agent.
+        
+        Args:
+            agent: CRCAAgent instance for accessing causal graph
+        """
+        self.agent = agent
+    
+    def analyze_scenarios(
+        self,
+        scenarios_with_metadata: List[Tuple[CounterfactualScenario, Dict[str, Any]]]
+    ) -> List[Tuple[CounterfactualScenario, float]]:
+        """Comprehensive meta-analysis of scenarios.
+        
+        Args:
+            scenarios_with_metadata: List of (scenario, metadata) tuples
+            
+        Returns:
+            List of (scenario, meta_reasoning_score) tuples, sorted by score
+        """
+        scored_scenarios = []
+        
+        for scenario, metadata in scenarios_with_metadata:
+            # Calculate scenario relevance (information gain, expected utility)
+            relevance_score = self._calculate_relevance(scenario, metadata)
+            
+            # Calculate graph uncertainty impact
+            uncertainty_impact = self._calculate_uncertainty_impact(scenario, metadata)
+            
+            # Calculate prediction reliability
+            reliability = metadata.get("quality_score", 0.5)
+            
+            # Informativeness score: combines relevance + reliability
+            informativeness = 0.5 * relevance_score + 0.3 * reliability + 0.2 * (1.0 - uncertainty_impact)
+            
+            scored_scenarios.append((scenario, informativeness))
+        
+        # Sort by informativeness (descending)
+        scored_scenarios.sort(key=lambda x: x[1], reverse=True)
+        
+        return scored_scenarios
+    
+    def _calculate_relevance(
+        self,
+        scenario: CounterfactualScenario,
+        metadata: Dict[str, Any]
+    ) -> float:
+        """Calculate scenario relevance (information gain, expected utility)."""
+        # Information gain: how different is this scenario from factual?
+        factual_state = metadata.get("factual_state", {})
+        interventions = scenario.interventions
+        
+        # Calculate magnitude of intervention
+        intervention_magnitude = 0.0
+        for var, val in interventions.items():
+            factual_val = factual_state.get(var, 0.0)
+            stats = self.agent.standardization_stats.get(var, {"mean": 0.0, "std": 1.0})
+            std = stats.get("std", 1.0) or 1.0
+            # Normalized difference
+            diff = abs(val - factual_val) / std if std > 0 else abs(val - factual_val)
+            intervention_magnitude += diff
+        
+        # Expected utility: how much do outcomes change?
+        outcome_magnitude = 0.0
+        for var, val in scenario.expected_outcomes.items():
+            factual_val = factual_state.get(var, 0.0)
+            stats = self.agent.standardization_stats.get(var, {"mean": 0.0, "std": 1.0})
+            std = stats.get("std", 1.0) or 1.0
+            diff = abs(val - factual_val) / std if std > 0 else abs(val - factual_val)
+            outcome_magnitude += diff
+        
+        # Relevance: combination of intervention and outcome magnitude
+        # Normalize by number of variables
+        n_vars = max(1, len(interventions))
+        relevance = (intervention_magnitude + outcome_magnitude) / (2.0 * n_vars)
+        
+        return min(1.0, relevance)
+    
+    def _calculate_uncertainty_impact(
+        self,
+        scenario: CounterfactualScenario,
+        metadata: Dict[str, Any]
+    ) -> float:
+        """Calculate how graph uncertainty affects predictions."""
+        quality_metrics = metadata.get("quality_metrics", {})
+        consistency = quality_metrics.get("consistency", {})
+        
+        if not consistency:
+            return 0.5  # Default moderate uncertainty
+        
+        # Average coefficient of variation across all variables
+        cvs = [s.get("coefficient_of_variation", 0.0) for s in consistency.values()]
+        avg_cv = float(np.mean(cvs)) if cvs else 0.0
+        
+        # Uncertainty impact: higher CV = higher impact
+        return min(1.0, avg_cv)
 
 
 class CRCAAgent(Agent):
@@ -196,6 +745,12 @@ class CRCAAgent(Agent):
         seed: Optional[int] = None,
         enable_excel: bool = False,
         agent_max_loops: Optional[Union[int, str]] = None,
+        policy: Optional[Union[DoctrineV1, str]] = None,
+        ledger_path: Optional[str] = None,
+        epoch_seconds: int = 3600,
+        policy_mode: bool = False,
+        sensor_registry: Optional[Any] = None,
+        actuator_registry: Optional[Any] = None,
         **kwargs,
     ):
         """
@@ -208,6 +763,10 @@ class CRCAAgent(Agent):
             agent_max_loops: Maximum loops for standard Agent operations (supports "auto")
                             If not provided, defaults to 1 for individual LLM calls.
                             Pass "auto" to enable automatic loop detection for standard operations.
+            policy: Policy doctrine (DoctrineV1 instance or path to JSON file) for policy mode
+            ledger_path: Path to SQLite ledger database for event storage
+            epoch_seconds: Length of one epoch in seconds (default: 3600)
+            policy_mode: Enable temporal policy engine mode (default: False)
             **kwargs: Additional arguments passed to parent Agent class
         """
         
@@ -381,6 +940,48 @@ class CRCAAgent(Agent):
         self._prediction_cache_max: int = 1000
         self._cache_enabled: bool = True
         self._prediction_cache_lock = threading.Lock()
+        
+        # Policy engine integration
+        self.policy_mode = bool(policy_mode)
+        self.policy: Optional[DoctrineV1] = None
+        self.ledger: Optional[Ledger] = None
+        self.epoch_seconds = int(epoch_seconds)
+        self.policy_loop: Optional[PolicyLoopMixin] = None
+        
+        if self.policy_mode:
+            if not POLICY_ENGINE_AVAILABLE:
+                raise ImportError(
+                    "Policy engine modules not available. "
+                    "Ensure schemas/policy.py, utils/ledger.py, and templates/policy_loop.py exist."
+                )
+            
+            # Load policy
+            if policy is None:
+                raise ValueError("policy must be provided when policy_mode=True")
+            
+            if isinstance(policy, str):
+                # Load from JSON file
+                self.policy = DoctrineV1.from_json(policy)
+            elif isinstance(policy, DoctrineV1):
+                self.policy = policy
+            else:
+                raise TypeError(f"policy must be DoctrineV1 or str (JSON path), got {type(policy)}")
+            
+            # Initialize ledger
+            if ledger_path is None:
+                ledger_path = "crca_ledger.db"
+            self.ledger = Ledger(ledger_path)
+            
+            # Initialize policy loop mixin
+            self.policy_loop = PolicyLoopMixin(
+                doctrine=self.policy,
+                ledger=self.ledger,
+                seed=self.seed,
+                sensor_registry=sensor_registry,
+                actuator_registry=actuator_registry
+            )
+            
+            logger.info(f"Policy mode enabled: doctrine={self.policy.version}, ledger={ledger_path}")
         
         # Excel TUI integration
         self._excel_enabled = bool(enable_excel)
@@ -1239,6 +1840,54 @@ class CRCAAgent(Agent):
             z_pred[node] = s
         
         return {v: self._destandardize_value(v, z) for v, z in z_pred.items()}
+    
+    def _predict_outcomes_with_graph_variant(
+        self,
+        factual_state: Dict[str, float],
+        interventions: Dict[str, float],
+        graph_variant: Dict[Tuple[str, str], float]
+    ) -> Dict[str, float]:
+        """Predict outcomes using a temporary graph variant.
+        
+        Temporarily applies a graph variant (perturbed edge strengths),
+        runs prediction, then restores original graph.
+        
+        Args:
+            factual_state: Current factual state
+            interventions: Interventions to apply
+            graph_variant: Dictionary mapping (source, target) -> strength
+            
+        Returns:
+            Predicted outcomes
+        """
+        # Save original edge strengths
+        original_strengths: Dict[Tuple[str, str], float] = {}
+        for (u, v), variant_strength in graph_variant.items():
+            if u in self.causal_graph and v in self.causal_graph[u]:
+                edge = self.causal_graph[u][v]
+                if isinstance(edge, dict):
+                    original_strengths[(u, v)] = edge.get("strength", 0.0)
+                    # Temporarily apply variant
+                    self.causal_graph[u][v]["strength"] = variant_strength
+                else:
+                    original_strengths[(u, v)] = float(edge) if edge is not None else 0.0
+                    # Convert to dict format
+                    self.causal_graph[u][v] = {"strength": variant_strength, "confidence": 1.0}
+        
+        try:
+            # Run prediction with variant graph
+            predictions = self._predict_outcomes(factual_state, interventions)
+        finally:
+            # Restore original edge strengths
+            for (u, v), original_strength in original_strengths.items():
+                if u in self.causal_graph and v in self.causal_graph[u]:
+                    edge = self.causal_graph[u][v]
+                    if isinstance(edge, dict):
+                        edge["strength"] = original_strength
+                    else:
+                        self.causal_graph[u][v] = original_strength
+        
+        return predictions
 
     def _predict_z(self, factual_state: Dict[str, float], interventions: Dict[str, float], use_noise: Optional[Dict[str, float]] = None) -> Dict[str, float]:
         
@@ -1450,9 +2099,184 @@ class CRCAAgent(Agent):
         self,
         factual_state: Dict[str, float],
         target_variables: List[str],
+        max_scenarios: int = 5,
+        use_monte_carlo: bool = True,
+        mc_samples: int = 1000,
+        parallel_sampling: bool = True,
+        use_deterministic_fallback: bool = False
+    ) -> List[CounterfactualScenario]:
+        """Generate counterfactual scenarios using meta-Monte Carlo reasoning.
+        
+        Args:
+            factual_state: Current factual state
+            target_variables: Variables to generate scenarios for
+            max_scenarios: Maximum number of scenarios to return
+            use_monte_carlo: Whether to use Monte Carlo sampling (default: True)
+            mc_samples: Number of Monte Carlo iterations (default: 1000)
+            parallel_sampling: Whether to sample graph and interventions in parallel (default: True)
+            use_deterministic_fallback: Fallback to old deterministic method if MC fails (default: False)
+            
+        Returns:
+            List of CounterfactualScenario objects with uncertainty metadata
+        """
+        # Fallback to old deterministic method if requested
+        if not use_monte_carlo:
+            return self._generate_counterfactual_scenarios_deterministic(
+                factual_state, target_variables, max_scenarios
+            )
+        
+        try:
+            self.ensure_standardization_stats(factual_state)
+            
+            # Initialize helper classes
+            intervention_sampler = _AdaptiveInterventionSampler(self)
+            graph_sampler = _GraphUncertaintySampler(self)
+            quality_assessor = _PredictionQualityAssessor(self)
+            meta_analyzer = _MetaReasoningAnalyzer(self)
+            
+            # Get uncertainty data if available (from quantify_uncertainty)
+            uncertainty_data = None
+            # Try to get from cached uncertainty results if available
+            if hasattr(self, '_cached_uncertainty_data'):
+                uncertainty_data = self._cached_uncertainty_data
+            
+            # Parallel sampling: graph variations and interventions
+            import concurrent.futures
+            
+            n_graph_samples = max(10, mc_samples // 100)  # Sample fewer graph variants
+            n_intervention_samples = mc_samples
+            
+            if parallel_sampling and self.bootstrap_workers > 0:
+                # Parallel execution
+                with concurrent.futures.ThreadPoolExecutor(max_workers=self.bootstrap_workers) as executor:
+                    graph_future = executor.submit(
+                        graph_sampler.sample_graph_variations,
+                        n_graph_samples,
+                        uncertainty_data
+                    )
+                    intervention_future = executor.submit(
+                        intervention_sampler.sample_interventions,
+                        factual_state,
+                        target_variables,
+                        n_intervention_samples
+                    )
+                    
+                    graph_variations = graph_future.result()
+                    interventions_list = intervention_future.result()
+            else:
+                # Sequential execution
+                graph_variations = graph_sampler.sample_graph_variations(
+                    n_graph_samples,
+                    uncertainty_data
+                )
+                interventions_list = intervention_sampler.sample_interventions(
+                    factual_state,
+                    target_variables,
+                    n_intervention_samples
+                )
+            
+            # For each intervention, evaluate across graph variations
+            scenarios_with_metadata = []
+            
+            for intervention in interventions_list:
+                # Get predictions across all graph variations
+                predictions_across_variants = []
+                for graph_variant in graph_variations:
+                    pred = self._predict_outcomes_with_graph_variant(
+                        factual_state,
+                        intervention,
+                        graph_variant
+                    )
+                    predictions_across_variants.append(pred)
+                
+                # Assess prediction quality
+                quality_score, quality_metrics = quality_assessor.assess_quality(
+                    predictions_across_variants,
+                    factual_state,
+                    intervention
+                )
+                
+                # Aggregate predictions (mean across variants)
+                aggregated_outcomes = {}
+                for var in set().union(*[p.keys() for p in predictions_across_variants]):
+                    values = [p.get(var, 0.0) for p in predictions_across_variants]
+                    aggregated_outcomes[var] = float(np.mean(values))
+                
+                # Determine sampling distribution used
+                sampling_dist = "adaptive"  # Default
+                for var in intervention.keys():
+                    dist_type, _ = intervention_sampler._get_adaptive_distribution(var, factual_state)
+                    sampling_dist = dist_type
+                    break
+                
+                # Create scenario with metadata
+                scenario = CounterfactualScenario(
+                    name=f"mc_scenario_{len(scenarios_with_metadata)}",
+                    interventions=intervention,
+                    expected_outcomes=aggregated_outcomes,
+                    probability=self._calculate_scenario_probability(factual_state, intervention),
+                    reasoning=f"Monte Carlo sampled intervention with quality score {quality_score:.3f}",
+                    uncertainty_metadata={
+                        "quality_score": quality_score,
+                        "quality_metrics": quality_metrics,
+                        "graph_variations_tested": len(graph_variations),
+                        "prediction_variance": {
+                            var: float(np.var([p.get(var, 0.0) for p in predictions_across_variants]))
+                            for var in aggregated_outcomes.keys()
+                        }
+                    },
+                    sampling_distribution=sampling_dist,
+                    monte_carlo_iterations=mc_samples,
+                    meta_reasoning_score=None  # Will be set by meta_analyzer
+                )
+                
+                scenarios_with_metadata.append((
+                    scenario,
+                    {
+                        "factual_state": factual_state,
+                        "quality_score": quality_score,
+                        "quality_metrics": quality_metrics
+                    }
+                ))
+            
+            # Meta-reasoning analysis: rank scenarios by informativeness
+            ranked_scenarios = meta_analyzer.analyze_scenarios(scenarios_with_metadata)
+            
+            # Update meta_reasoning_score in scenarios
+            final_scenarios = []
+            for scenario, meta_score in ranked_scenarios[:max_scenarios]:
+                # Update scenario with meta-reasoning score
+                scenario.meta_reasoning_score = meta_score
+                final_scenarios.append(scenario)
+            
+            return final_scenarios
+            
+        except Exception as e:
+            logger.error(f"Monte Carlo counterfactual generation failed: {e}")
+            if use_deterministic_fallback:
+                logger.warning("Falling back to deterministic method")
+                return self._generate_counterfactual_scenarios_deterministic(
+                    factual_state, target_variables, max_scenarios
+                )
+            else:
+                raise
+    
+    def _generate_counterfactual_scenarios_deterministic(
+        self,
+        factual_state: Dict[str, float],
+        target_variables: List[str],
         max_scenarios: int = 5
     ) -> List[CounterfactualScenario]:
+        """Original deterministic counterfactual scenario generation (for backward compatibility).
         
+        Args:
+            factual_state: Current factual state
+            target_variables: Variables to generate scenarios for
+            max_scenarios: Maximum number of scenarios to return
+            
+        Returns:
+            List of CounterfactualScenario objects
+        """
         self.ensure_standardization_stats(factual_state)
 
         scenarios: List[CounterfactualScenario] = []
@@ -3264,6 +4088,68 @@ IMPORTANT:
             return {}
         
         return self._excel_tables.get_all_tables()
+    
+    # =========================
+    # Policy Engine Methods
+    # =========================
+    
+    def run_policy_loop(
+        self,
+        num_epochs: int,
+        sensor_provider: Optional[Callable] = None,
+        actuator: Optional[Callable] = None,
+        start_epoch: int = 0
+    ) -> Dict[str, Any]:
+        """
+        Execute temporal policy loop for specified number of epochs.
+        
+        Args:
+            num_epochs: Number of epochs to execute
+            sensor_provider: Function that returns current state snapshot (Dict[str, float])
+                          If None, uses dummy sensor (all metrics = 0.0)
+            actuator: Function that executes interventions (takes List[InterventionSpec])
+                     If None, interventions are logged but not executed
+            start_epoch: Starting epoch number (default: 0)
+            
+        Returns:
+            Dict[str, Any]: Summary with decision hashes and epoch results
+            
+        Raises:
+            RuntimeError: If policy_mode is not enabled
+        """
+        if not self.policy_mode or self.policy_loop is None:
+            raise RuntimeError("Policy mode not enabled. Set policy_mode=True and provide policy.")
+        
+        results = []
+        decision_hashes = []
+        
+        for epoch in range(start_epoch, start_epoch + num_epochs):
+            try:
+                epoch_result = self.policy_loop.run_epoch(
+                    epoch=epoch,
+                    sensor_provider=sensor_provider,
+                    actuator=actuator
+                )
+                results.append(epoch_result)
+                decision_hashes.append(epoch_result.get("decision_hash", ""))
+                logger.info(f"Epoch {epoch} completed: {len(epoch_result.get('interventions', []))} interventions")
+            except Exception as e:
+                logger.error(f"Error in epoch {epoch}: {e}")
+                raise
+        
+        return {
+            "num_epochs": num_epochs,
+            "start_epoch": start_epoch,
+            "end_epoch": start_epoch + num_epochs - 1,
+            "decision_hashes": decision_hashes,
+            "epoch_results": results,
+            "policy_hash": self.policy_loop.compiled_policy.policy_hash,
+            "summary": {
+                "total_interventions": sum(len(r.get("interventions", [])) for r in results),
+                "conservative_mode_triggered": any(r.get("conservative_mode", False) for r in results),
+                "drift_detected": any(r.get("cusum_stat", 0.0) > self.policy_loop.cusum_h for r in results)
+            }
+        }
 
 
 
