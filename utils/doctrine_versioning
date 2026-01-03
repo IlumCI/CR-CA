@@ -1,0 +1,230 @@
+"""Doctrine versioning and migration system.
+
+Provides version management, compatibility checking, and migration
+between doctrine versions.
+"""
+
+from typing import Any, Dict, List, Optional, Callable
+from loguru import logger
+import re
+
+from schemas.policy import DoctrineV1
+
+
+class DoctrineVersion:
+    """Doctrine version information.
+    
+    Attributes:
+        version: Semantic version string (e.g., "1.0.0")
+        compatibility: List of compatible versions
+        migration_script: Optional migration function name
+    """
+    
+    def __init__(
+        self,
+        version: str,
+        compatibility: Optional[List[str]] = None,
+        migration_script: Optional[str] = None
+    ):
+        """
+        Initialize doctrine version.
+        
+        Args:
+            version: Semantic version string
+            compatibility: List of compatible versions
+            migration_script: Optional migration function name
+        """
+        self.version = version
+        self.compatibility = compatibility or []
+        self.migration_script = migration_script
+    
+    def is_compatible_with(self, other_version: str) -> bool:
+        """
+        Check if this version is compatible with another.
+        
+        Args:
+            other_version: Version to check compatibility with
+            
+        Returns:
+            bool: True if compatible
+        """
+        if other_version == self.version:
+            return True
+        return other_version in self.compatibility
+    
+    def parse_semver(self) -> tuple:
+        """Parse semantic version into (major, minor, patch)."""
+        match = re.match(r'^(\d+)\.(\d+)\.(\d+)$', self.version)
+        if match:
+            return tuple(int(x) for x in match.groups())
+        # Fallback: try "major.minor" format
+        match = re.match(r'^(\d+)\.(\d+)$', self.version)
+        if match:
+            return (int(match.group(1)), int(match.group(2)), 0)
+        return (0, 0, 0)
+
+
+class DoctrineRegistry:
+    """Registry for doctrine versions with migration support.
+    
+    Manages doctrine versions, compatibility, and migration between versions.
+    """
+    
+    def __init__(self):
+        """Initialize doctrine registry."""
+        self.versions: Dict[str, DoctrineVersion] = {}
+        self.doctrines: Dict[str, DoctrineV1] = {}  # version -> doctrine
+        self.migration_functions: Dict[Tuple[str, str], Callable] = {}  # (from, to) -> function
+    
+    def register(
+        self,
+        doctrine: DoctrineV1,
+        compatibility: Optional[List[str]] = None,
+        migration_script: Optional[str] = None
+    ) -> None:
+        """
+        Register a doctrine version.
+        
+        Args:
+            doctrine: Doctrine to register
+            compatibility: List of compatible versions
+            migration_script: Optional migration function name
+        """
+        version = doctrine.version
+        self.versions[version] = DoctrineVersion(version, compatibility, migration_script)
+        self.doctrines[version] = doctrine
+        logger.info(f"Registered doctrine version {version}")
+    
+    def get(self, version: str) -> Optional[DoctrineV1]:
+        """
+        Get doctrine by version.
+        
+        Args:
+            version: Version string
+            
+        Returns:
+            DoctrineV1 or None if not found
+        """
+        return self.doctrines.get(version)
+    
+    def check_compatibility(self, v1: str, v2: str) -> bool:
+        """
+        Check if two versions are compatible.
+        
+        Args:
+            v1: First version
+            v2: Second version
+            
+        Returns:
+            bool: True if compatible
+        """
+        if v1 == v2:
+            return True
+        
+        version1 = self.versions.get(v1)
+        version2 = self.versions.get(v2)
+        
+        if not version1 or not version2:
+            return False
+        
+        return version1.is_compatible_with(v2) or version2.is_compatible_with(v1)
+    
+    def register_migration(
+        self,
+        from_version: str,
+        to_version: str,
+        migration_func: Callable[[Dict[str, Any]], Dict[str, Any]]
+    ) -> None:
+        """
+        Register a migration function between versions.
+        
+        Args:
+            from_version: Source version
+            to_version: Target version
+            migration_func: Function that takes old doctrine dict and returns new doctrine dict
+        """
+        self.migration_functions[(from_version, to_version)] = migration_func
+        logger.info(f"Registered migration from {from_version} to {to_version}")
+    
+    def migrate(
+        self,
+        from_version: str,
+        to_version: str,
+        doctrine_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Migrate doctrine data from one version to another.
+        
+        Args:
+            from_version: Source version
+            to_version: Target version
+            doctrine_data: Doctrine data dictionary
+            
+        Returns:
+            Dict[str, Any]: Migrated doctrine data
+        """
+        if from_version == to_version:
+            return doctrine_data
+        
+        # Check if direct migration exists
+        migration_key = (from_version, to_version)
+        if migration_key in self.migration_functions:
+            logger.info(f"Migrating doctrine from {from_version} to {to_version}")
+            return self.migration_functions[migration_key](doctrine_data)
+        
+        # Try to find path through intermediate versions
+        # For now, we'll just return the data with updated version
+        logger.warning(f"No migration path from {from_version} to {to_version}, updating version only")
+        doctrine_data["version"] = to_version
+        return doctrine_data
+    
+    def get_latest_version(self) -> Optional[str]:
+        """Get the latest registered version."""
+        if not self.versions:
+            return None
+        
+        # Sort by semantic version
+        versions = sorted(
+            self.versions.keys(),
+            key=lambda v: self.versions[v].parse_semver(),
+            reverse=True
+        )
+        return versions[0] if versions else None
+    
+    def list_versions(self) -> List[str]:
+        """List all registered versions."""
+        return sorted(
+            self.versions.keys(),
+            key=lambda v: self.versions[v].parse_semver()
+        )
+
+
+# Global registry instance
+_default_registry: Optional[DoctrineRegistry] = None
+
+
+def get_registry() -> DoctrineRegistry:
+    """Get the default doctrine registry."""
+    global _default_registry
+    if _default_registry is None:
+        _default_registry = DoctrineRegistry()
+    return _default_registry
+
+
+def register_doctrine(
+    doctrine: DoctrineV1,
+    compatibility: Optional[List[str]] = None,
+    migration_script: Optional[str] = None
+) -> None:
+    """Register a doctrine in the default registry."""
+    get_registry().register(doctrine, compatibility, migration_script)
+
+
+def migrate_doctrine(
+    from_version: str,
+    to_version: str,
+    doctrine_data: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Migrate doctrine using the default registry."""
+    return get_registry().migrate(from_version, to_version, doctrine_data)
+
