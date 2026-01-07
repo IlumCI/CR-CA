@@ -145,3 +145,7 @@ exclude = [
 minversion = "7.0"
 addopts = "-q"
 testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
