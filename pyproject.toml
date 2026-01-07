@@ -101,18 +101,21 @@ Documentation = "https://github.com/IlumCI/CR-CA/blob/main/README.md"
 Issues = "https://github.com/IlumCI/CR-CA/issues"
 
 [tool.hatchling.build.targets.wheel]
-# Explicitly include root-level package files and all subdirectories
-# Since package name is 'crca' but root has __init__.py, we use only-include
-only-include = [
-  "__init__.py",
-  "CRCA.py",
+# Force hatchling to include everything by using packages configuration
+# Since we have root-level package structure, we explicitly list all packages
+packages = [
   "utils",
   "tools",
-  "templates",
+  "templates", 
   "schemas",
   "branches",
+  "branches.crca_sd",
+  "branches.crca_cg",
   "prompts",
 ]
+# Also explicitly include root files - this ensures they're in the wheel
+# Root files go at wheel root, not in a subdirectory
+shared-data = { "." = ["__init__.py", "CRCA.py"] }
 # Explicitly exclude sensitive files from the package
 exclude = [
   "**/.env",
