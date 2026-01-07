@@ -1,6 +1,6 @@
 # CR-CA: Causal Reasoning and Counterfactual Analysis Framework
 
-**Version**: v1.3.0  
+**Version**: v1.4.0  
 **Repository**: [https://github.com/IlumCI/CR-CA](https://github.com/IlumCI/CR-CA)  
 **License**: Apache-2.0
 
@@ -4218,13 +4218,24 @@ pip install pytest black mypy
 
 ## Changelog
 
-### v1.3.0 (Current)
+### v1.4.0 (Current)
+
+- **Comprehensive Documentation Overhaul**: Complete README rewrite with 100+ code examples
+- **Policy Engine System Documentation**: Full documentation with 21+ examples covering DoctrineV1, Ledger, Rollback, PolicyLoop, MPC, Drift Detection, Sensors, and Actuators
+- **Expanded Module Documentation**: Extensive examples for Utils (15+), Tools (15+), Templates (12+), Schemas, and Prompts
+- **Architecture Diagrams**: Added system architecture, policy engine flow, and data flow diagrams
+- **Integration Examples**: Added 5 comprehensive integration examples
+- **CI/CD Documentation**: Added GitHub Actions workflows documentation
+- **Project Structure**: Added comprehensive directory structure documentation
+- **Bolt.diy Documentation**: Added WIP section for web application
+
+### v1.3.0
 
 - **Automatic Variable Extraction**: Major feature allowing automatic extraction of variables and causal relationships from natural language tasks
 - **Enhanced LLM Integration**: Improved tool execution and ML-based extraction methods
 - **Module Expansions**: Comprehensive updates to all modules (utils, tools, templates, schemas)
 - **Integration Improvements**: Better integration patterns for CRCA-SD, CRCA-CG, and CRCA-Q
-- **Documentation**: Complete README rewrite with comprehensive module documentation
+- **Documentation**: Initial README improvements
 
 ### v1.2.0
 
@@ -4293,7 +4304,7 @@ Uses PyPI trusted publishing (OIDC) for secure, token-free publishing.
 
 1. Go to GitHub Actions → "Publish to PyPI"
 2. Click "Run workflow"
-3. Enter version (e.g., "1.3.0")
+3. Enter version (e.g., "1.4.0")
 4. Optionally check "Publish to TestPyPI"
 5. Click "Run workflow"
 
