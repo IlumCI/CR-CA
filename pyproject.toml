@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "crca"
-version = "1.3.0"
+version = "1.4.0"
 description = "CR-CA Lite — lightweight causal reasoning agent with advanced analysis suite (CR-CA)"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -100,7 +100,7 @@ Repository = "https://github.com/IlumCI/CR-CA"
 Documentation = "https://github.com/IlumCI/CR-CA/blob/main/README.md"
 Issues = "https://github.com/IlumCI/CR-CA/issues"
 
-[tool.hatchling.build]
+[tool.hatchling.build.targets.wheel]
 # Include root directory as package (contains __init__.py and CRCA.py)
 # Also include all subdirectories as packages
 packages = [
@@ -114,8 +114,6 @@ packages = [
   "branches.crca_cg",
   "prompts",
 ]
-
-[tool.hatchling.build.targets.wheel]
 # Explicitly exclude sensitive files from the package
 exclude = [
   "**/.env",
