@@ -1,11 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
-name = "cr-ca"
+name = "crca"
 version = "1.3.0"
 description = "CR-CA Lite — lightweight causal reasoning agent with advanced analysis suite (CR-CA)"
 readme = "README.md"
 requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
 authors = [
   { name="Ilum", email="a.leilionas@vk.com" }
+]
+keywords = [
+  "causal-reasoning",
+  "counterfactual-analysis",
+  "structural-causal-models",
+  "llm",
+  "machine-learning",
+  "data-science",
+  "optimization",
+  "governance",
+  "trading",
+  "socioeconomic-dynamics"
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+  "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
   "numpy>=1.23",
@@ -13,8 +45,7 @@ dependencies = [
   "scipy>=1.10",
   "rustworkx>=0.12.0",
   "networkx>=3.0",
-  "dowhy>=0.11",
-  "cvxpy>=1.4",
+  "dowhy>=0.8",
   "optuna>=3.0",
   "torch>=2.0.0",
   "scikit-learn>=1.3",
@@ -48,11 +79,69 @@ dependencies = [
   "openai>=1.0.0",
   "swarms",
   "litellm>=0.1",
+  "psutil>=5.9.0",
+]
+
+[project.optional-dependencies]
+optimization = [
+  "cvxpy>=1.4",  # Requires C++ build tools on Windows (Microsoft Visual C++ 14.0+)
+]
+dev = [
+  "pytest>=7.0",
+  "pytest-cov>=4.0",
+  "black>=23.0",
+  "mypy>=1.0",
+  "ruff>=0.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/IlumCI/CR-CA"
+Repository = "https://github.com/IlumCI/CR-CA"
+Documentation = "https://github.com/IlumCI/CR-CA/blob/main/README.md"
+Issues = "https://github.com/IlumCI/CR-CA/issues"
+
+[tool.hatchling.build]
+# Include root directory as package (contains __init__.py and CRCA.py)
+# Also include all subdirectories as packages
+packages = [
+  ".",
+  "utils",
+  "tools",
+  "templates",
+  "schemas",
+  "branches",
+  "branches.crca_sd",
+  "branches.crca_cg",
+  "prompts",
+]
+
+[tool.hatchling.build.targets.wheel]
+# Explicitly exclude sensitive files from the package
+exclude = [
+  "**/.env",
+  "**/.env.*",
+  "**/.env.local",
+  "**/*.key",
+  "**/*.pem",
+  "**/secrets.json",
+  "**/credentials.json",
+  "**/config.local.*",
+  "**/*_snapshot_*.json",
+  "**/error.txt",
+  "**/*.log",
+  "**/node_modules/**",
+  "**/venv/**",
+  "**/venv_wsl/**",
+  "**/.git/**",
+  "**/.github/**",
+  "**/__pycache__/**",
+  "**/*.pyc",
+  "**/.pytest_cache/**",
+  "**/dist/**",
+  "**/build/**",
 ]
 
 [tool.pytest.ini_options]
 minversion = "7.0"
 addopts = "-q"
-testpaths = ["CR-CA"]
-
-
+testpaths = ["tests"]

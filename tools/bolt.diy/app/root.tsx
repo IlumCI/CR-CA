@@ -2,8 +2,8 @@ import { useStore } from '@nanostores/react';
 import type { LinksFunction } from '@remix-run/cloudflare';
 import { Links, Meta, Outlet, Scripts, ScrollRestoration } from '@remix-run/react';
 import tailwindReset from '@unocss/reset/tailwind-compat.css?url';
-import { themeStore } from './lib/stores/theme';
-import { stripIndents } from './utils/stripIndent';
+import { themeStore } from '~/lib/stores/theme';
+import { stripIndents } from '~/utils/stripIndent';
 import { createHead } from 'remix-island';
 import { useEffect } from 'react';
 import { DndProvider } from 'react-dnd';
@@ -12,7 +12,7 @@ import { ClientOnly } from 'remix-utils/client-only';
 import { cssTransition, ToastContainer } from 'react-toastify';
 
 import reactToastifyStyles from 'react-toastify/dist/ReactToastify.css?url';
-import globalStyles from './styles/index.scss?url';
+import globalStyles from '~/styles/index.scss?url';
 import xtermStyles from '@xterm/xterm/css/xterm.css?url';
 
 import 'virtual:uno.css';
@@ -81,38 +81,42 @@ export function Layout({ children }: { children: React.ReactNode }) {
   return (
     <>
       <ClientOnly>{() => <DndProvider backend={HTML5Backend}>{children}</DndProvider>}</ClientOnly>
-      <ToastContainer
-        closeButton={({ closeToast }) => {
-          return (
-            <button className="Toastify__close-button" onClick={closeToast}>
-              <div className="i-ph:x text-lg" />
-            </button>
-          );
-        }}
-        icon={({ type }) => {
-          switch (type) {
-            case 'success': {
-              return <div className="i-ph:check-bold text-bolt-elements-icon-success text-2xl" />;
-            }
-            case 'error': {
-              return <div className="i-ph:warning-circle-bold text-bolt-elements-icon-error text-2xl" />;
-            }
-          }
+      <ClientOnly>
+        {() => (
+          <ToastContainer
+            closeButton={({ closeToast }) => {
+              return (
+                <button className="Toastify__close-button" onClick={closeToast}>
+                  <div className="i-ph:x text-lg" />
+                </button>
+              );
+            }}
+            icon={({ type }) => {
+              switch (type) {
+                case 'success': {
+                  return <div className="i-ph:check-bold text-bolt-elements-icon-success text-2xl" />;
+                }
+                case 'error': {
+                  return <div className="i-ph:warning-circle-bold text-bolt-elements-icon-error text-2xl" />;
+                }
+              }
 
-          return undefined;
-        }}
-        position="bottom-right"
-        pauseOnFocusLoss
-        transition={toastAnimation}
-        autoClose={3000}
-      />
+              return undefined;
+            }}
+            position="bottom-right"
+            pauseOnFocusLoss
+            transition={toastAnimation}
+            autoClose={3000}
+          />
+        )}
+      </ClientOnly>
       <ScrollRestoration />
       <Scripts />
     </>
   );
 }
 
-import { logStore } from './lib/stores/logs';
+import { logStore } from '~/lib/stores/logs';
 
 export default function App() {
   const theme = useStore(themeStore);
@@ -126,7 +130,7 @@ export default function App() {
     });
 
     // Initialize debug logging with improved error handling
-    import('./utils/debugLogger')
+    import('~/utils/debugLogger')
       .then(({ debugLogger }) => {
         /*
          * The debug logger initializes itself and starts disabled by default

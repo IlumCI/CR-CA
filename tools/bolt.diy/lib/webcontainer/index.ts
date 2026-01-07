@@ -23,6 +23,9 @@ if (!import.meta.env.SSR) {
     import.meta.hot?.data.webcontainer ??
     Promise.resolve()
       .then(() => {
+        // Note: We can't emit events here since we don't have a mandateId yet
+        // Events will be emitted from the execute page after webcontainer is initialized
+        console.log('[WebContainer] Starting boot process...');
         return WebContainer.boot({
           coep: 'credentialless',
           workdirName: WORK_DIR_NAME,
@@ -30,13 +33,16 @@ if (!import.meta.env.SSR) {
         });
       })
       .then(async (webcontainer) => {
+        console.log('[WebContainer] Boot complete, initializing filesystem and preview...');
         webcontainerContext.loaded = true;
 
         const { workbenchStore } = await import('~/lib/stores/workbench');
 
+        console.log('[WebContainer] Loading inspector script...');
         const response = await fetch('/inspector-script.js');
         const inspectorScript = await response.text();
         await webcontainer.setPreviewScript(inspectorScript);
+        console.log('[WebContainer] Inspector script loaded');
 
         // Listen for preview errors
         webcontainer.on('preview-message', (message) => {
@@ -56,6 +62,7 @@ if (!import.meta.env.SSR) {
           }
         });
 
+        console.log('[WebContainer] Initialization complete, ready for use');
         return webcontainer;
       });
 

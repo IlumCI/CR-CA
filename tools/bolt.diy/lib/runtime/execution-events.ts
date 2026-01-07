@@ -256,6 +256,54 @@ export class ExecutionEventEmitter {
       level: 'error',
     });
   }
+
+  /**
+   * Initialization event helpers.
+   */
+  emitInitializationStart(metadata?: ExecutionEvent['metadata']): void {
+    this.emit('initialization_start', {
+      message: 'Starting mandate execution initialization',
+      status: 'running',
+    }, metadata);
+  }
+
+  emitWebContainerInit(step: string, progress?: number, metadata?: ExecutionEvent['metadata']): void {
+    this.emit('webcontainer_init', {
+      message: `WebContainer: ${step}`,
+      status: progress === 100 ? 'complete' : 'running',
+      progress,
+    }, metadata);
+  }
+
+  emitApiKeysLoaded(keysCount: number, keysAvailable: string[], metadata?: ExecutionEvent['metadata']): void {
+    this.emit('api_keys_loaded', {
+      message: `Loaded ${keysCount} API key(s)`,
+      keys_available: keysAvailable,
+      keys_count: keysCount,
+    }, metadata);
+  }
+
+  emitProviderConfigured(provider: string, model: string, metadata?: ExecutionEvent['metadata']): void {
+    this.emit('provider_configured', {
+      message: `LLM provider configured: ${provider} (model: ${model})`,
+      provider,
+      model,
+    }, metadata);
+  }
+
+  emitShellReady(metadata?: ExecutionEvent['metadata']): void {
+    this.emit('shell_ready', {
+      message: 'Shell terminal ready',
+      status: 'complete',
+    }, metadata);
+  }
+
+  emitExecutorReady(metadata?: ExecutionEvent['metadata']): void {
+    this.emit('executor_ready', {
+      message: 'MandateExecutor initialized and ready',
+      status: 'complete',
+    }, metadata);
+  }
 }
 
 /**
@@ -263,6 +311,7 @@ export class ExecutionEventEmitter {
  */
 class ExecutionEventRegistry {
   private emitters: Map<string, ExecutionEventEmitter> = new Map();
+  private mandates: Map<string, any> = new Map(); // Store mandate objects
 
   /**
    * Get or create event emitter for a mandate.
@@ -275,10 +324,25 @@ class ExecutionEventRegistry {
   }
 
   /**
+   * Store a mandate object for later retrieval.
+   */
+  storeMandate(mandateId: string, mandate: any): void {
+    this.mandates.set(mandateId, mandate);
+  }
+
+  /**
+   * Get a stored mandate object.
+   */
+  getMandate(mandateId: string): any | undefined {
+    return this.mandates.get(mandateId);
+  }
+
+  /**
    * Remove emitter for a mandate (cleanup after completion).
    */
   removeEmitter(mandateId: string): void {
     this.emitters.delete(mandateId);
+    this.mandates.delete(mandateId);
   }
 
   /**
@@ -293,6 +357,7 @@ class ExecutionEventRegistry {
    */
   clear(): void {
     this.emitters.clear();
+    this.mandates.clear();
   }
 }
 

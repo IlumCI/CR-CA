@@ -97,6 +97,52 @@ export interface DeploymentConfig {
 }
 
 /**
+ * Testing configuration for mandate.
+ */
+export interface TestingConfig {
+  enabled: boolean;
+  generate_tests: boolean;
+  run_tests: boolean;
+  test_framework?: "vitest" | "jest" | "mocha" | "pytest";
+  require_pass: boolean;
+}
+
+/**
+ * I/O operations configuration for mandate.
+ */
+export interface IOOperationsConfig {
+  file_operations?: Array<{
+    type: "read" | "write" | "delete" | "list";
+    path: string;
+    content?: string;
+  }>;
+  database_operations?: Array<{
+    type: "query" | "migrate" | "seed";
+    database: "supabase" | "sqlite";
+    query?: string;
+    table?: string;
+  }>;
+  api_calls?: Array<{
+    method: "GET" | "POST" | "PUT" | "DELETE";
+    url: string;
+    headers?: Record<string, string>;
+    body?: any;
+    timeout?: number;
+  }>;
+}
+
+/**
+ * Git operations configuration for mandate.
+ */
+export interface GitOperationsConfig {
+  enabled: boolean;
+  auto_commit: boolean;
+  repository?: string;
+  branch?: string;
+  commit_message?: string;
+}
+
+/**
  * Main mandate structure for autonomous execution.
  */
 export interface Mandate {
@@ -108,6 +154,9 @@ export interface Mandate {
   governance: MandateGovernance;
   iteration_config: IterationConfig;
   deployment?: DeploymentConfig;
+  testing?: TestingConfig;
+  io_operations?: IOOperationsConfig;
+  git_operations?: GitOperationsConfig;
   metadata?: {
     created_at?: number;
     created_by?: string;
@@ -130,7 +179,13 @@ export type ExecutionEventType =
   | "deployment_end"
   | "deployment_status"
   | "budget_warning"
-  | "constraint_violation";
+  | "constraint_violation"
+  | "initialization_start"
+  | "webcontainer_init"
+  | "api_keys_loaded"
+  | "provider_configured"
+  | "shell_ready"
+  | "executor_ready";
 
 /**
  * Execution event data structure.

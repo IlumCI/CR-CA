@@ -13,6 +13,8 @@ import asyncio
 import hashlib
 import json
 import os
+import sys
+import threading
 import time
 import traceback
 import uuid
@@ -25,9 +27,41 @@ from enum import Enum
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Union
 
+# Thread-safe lock for stdout/stderr operations (Rich formatting, logging, etc.)
+# Prevents reentrant call errors when multiple threads write to stdout/stderr simultaneously
+_stdout_lock = threading.Lock()
+
 # Third-party imports
 from loguru import logger
 from pydantic import BaseModel, Field
+
+# Rich formatting for agent outputs
+try:
+    # Add utils directory to path if not already there
+    # Try multiple possible paths
+    possible_paths = [
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "utils"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "utils"),
+        os.path.join(os.getcwd(), "utils"),
+    ]
+    
+    RICH_AVAILABLE = False
+    RICH_FORMATTER = None
+    
+    for utils_path in possible_paths:
+        if os.path.exists(utils_path) and os.path.exists(os.path.join(utils_path, "formatter.py")):
+            if utils_path not in sys.path:
+                sys.path.insert(0, utils_path)
+            try:
+                from formatter import Formatter
+                RICH_FORMATTER = Formatter(md=True)
+                RICH_AVAILABLE = True
+                break
+            except ImportError:
+                continue
+except Exception:
+    RICH_AVAILABLE = False
+    RICH_FORMATTER = None
 
 # Swarms imports
 from swarms.structs.agent import Agent
@@ -172,7 +206,7 @@ except (ImportError, AttributeError):
 # Default configuration values
 DEFAULT_BOARD_SIZE = 6
 DEFAULT_EXECUTIVE_TEAM_SIZE = 4
-DEFAULT_DECISION_THRESHOLD = 0.6
+DEFAULT_DECISION_THRESHOLD = 0.4  # AGGRESSIVE: Lower threshold for profit-focused approval
 DEFAULT_BUDGET_LIMIT = 200.0
 DEFAULT_BATCH_SIZE = 25
 DEFAULT_MEETING_DURATION = 600
@@ -365,10 +399,10 @@ class CorporateConfigModel(BaseModel):
     )
 
     major_decision_threshold: float = Field(
-        default=0.1,
+        default=0.5,  # AGGRESSIVE: Higher threshold (was 0.1) - allow larger autonomous spending
         ge=0.0,
         le=1.0,
-        description="Budget impact threshold (as fraction of total budget) requiring human approval.",
+        description="Budget impact threshold (as fraction of total budget) requiring human approval. Higher = more autonomous spending.",
     )
 
     max_autonomous_budget_per_period: float = Field(
@@ -383,10 +417,10 @@ class CorporateConfigModel(BaseModel):
     )
 
     risk_threshold_for_approval: float = Field(
-        default=0.7,
+        default=0.95,  # AGGRESSIVE: Very high threshold (was 0.7) - only extreme risks require approval
         ge=0.0,
         le=1.0,
-        description="Risk score threshold requiring human approval.",
+        description="Risk score threshold requiring human approval. Higher = more autonomous risk-taking.",
     )
 
     confidence_threshold: float = Field(
@@ -406,6 +440,37 @@ class CorporateConfigModel(BaseModel):
         default=3600,
         ge=60,
         description="Timeout in seconds for human approval requests.",
+    )
+
+    # Automation settings
+    auto_deploy_enabled: bool = Field(
+        default=False,
+        description="Enable automatic deployment after successful mandate execution.",
+    )
+
+    auto_test_enabled: bool = Field(
+        default=True,
+        description="Enable automatic test generation and execution.",
+    )
+
+    deployment_platform: str = Field(
+        default="netlify",
+        description="Default deployment platform: netlify, vercel, or github.",
+    )
+
+    require_tests_pass: bool = Field(
+        default=True,
+        description="Require tests to pass before deployment.",
+    )
+
+    auto_git_commit: bool = Field(
+        default=False,
+        description="Automatically commit changes to Git after successful execution.",
+    )
+
+    git_repository: Optional[str] = Field(
+        default=None,
+        description="Git repository URL for automatic commits.",
     )
 
 
@@ -730,6 +795,70 @@ class ComplianceFramework(BaseModel):
 class CorporateSwarm(BaseCorporateAgent):
     """Autonomous corporate governance system with democratic decision-making."""
     
+    def _run_agent_with_rich(
+        self,
+        agent: Any,
+        prompt: str,
+        title: str,
+        border_style: str = "cyan",
+        use_lock: bool = True
+    ) -> Any:
+        """
+        Run agent with Rich markdown output formatting.
+        
+        Args:
+            agent: Agent instance with run() method
+            prompt: Prompt to send to agent
+            title: Title for Rich output panel
+            border_style: Border style for panel
+            
+        Returns:
+            Agent execution result
+        """
+        result = agent.run(prompt)
+        
+        # Display LLM output with Rich formatting (thread-safe)
+        if RICH_AVAILABLE and RICH_FORMATTER:
+            try:
+                if use_lock:
+                    with _stdout_lock:
+                        if isinstance(result, str):
+                            RICH_FORMATTER.print_markdown(
+                                result,
+                                title=title,
+                                border_style=border_style
+                            )
+                        elif isinstance(result, dict):
+                            result_str = json.dumps(result, indent=2, default=str)
+                            RICH_FORMATTER.print_markdown(
+                                result_str,
+                                title=f"{title} (JSON)",
+                                border_style=border_style
+                            )
+                else:
+                    if isinstance(result, str):
+                        RICH_FORMATTER.print_markdown(
+                            result,
+                            title=title,
+                            border_style=border_style
+                        )
+                    elif isinstance(result, dict):
+                        result_str = json.dumps(result, indent=2, default=str)
+                        RICH_FORMATTER.print_markdown(
+                            result_str,
+                            title=f"{title} (JSON)",
+                            border_style=border_style
+                        )
+            except Exception as e:
+                # Use lock for error logging too
+                if use_lock:
+                    with _stdout_lock:
+                        CORPORATE_LOGGER.warning(f"Rich formatting failed: {e}")
+                else:
+                    CORPORATE_LOGGER.warning(f"Rich formatting failed: {e}")
+        
+        return result
+    
     def __init__(
         self,
         name: str = "CorporateSwarm",
@@ -799,6 +928,7 @@ class CorporateSwarm(BaseCorporateAgent):
         
         # Performance settings
         self.max_workers = os.cpu_count()
+        self.batch_size = self.config.batch_size
         
         # CRCA-SD Governance System
         self.governance_system: Optional[GovernanceSystem] = None
@@ -915,6 +1045,277 @@ class CorporateSwarm(BaseCorporateAgent):
             corporate_model_name="gpt-4o-mini"
         )
     
+    def decompose_task(self, task: str) -> List[Dict[str, Any]]:
+        """
+        Decompose a task into sub-tasks with dependencies and metadata.
+        
+        Uses LLM to break down complex tasks into manageable sub-tasks,
+        identifying dependencies, effort estimates, and execution order.
+        
+        Args:
+            task: The task string to decompose
+            
+        Returns:
+            List of sub-task dictionaries, each containing:
+            - task: Sub-task description
+            - dependencies: List of sub-task indices this depends on
+            - priority: Priority level (1-10, higher is more important)
+            - estimated_effort: Estimated effort/complexity (1-10)
+            - risk_level: Risk level (low, medium, high)
+            - budget_impact: Estimated budget impact
+        """
+        if self.verbose:
+            CORPORATE_LOGGER.info(f"Decomposing task: {task[:50]}...")
+        
+        try:
+            # Use a member agent for decomposition
+            decomposer_member = None
+            for member_id in self.board_members + self.executive_team:
+                member = self.members.get(member_id)
+                if member and member.agent and hasattr(member.agent, 'run'):
+                    decomposer_member = member
+                    break
+            
+            if not decomposer_member:
+                # No agent available - return single task
+                return [{
+                    "task": task,
+                    "dependencies": [],
+                    "priority": 5,
+                    "estimated_effort": 5,
+                    "risk_level": "medium",
+                    "budget_impact": 0.0
+                }]
+            
+            decomposition_prompt = f"""
+Break down the following corporate task into sub-tasks:
+
+TASK: {task}
+
+REQUIREMENTS:
+1. Identify all sub-tasks needed to complete this task
+2. Determine dependencies between sub-tasks (which must be done first)
+3. Estimate effort/complexity for each sub-task (1-10 scale)
+4. Assess risk level (low, medium, high) for each sub-task
+5. Estimate budget impact for each sub-task
+
+Return the decomposition in the following JSON format:
+{{
+  "subtasks": [
+    {{
+      "task": "Sub-task description",
+      "dependencies": [0, 1],  // Indices of sub-tasks this depends on
+      "priority": 8,  // 1-10, higher is more important
+      "estimated_effort": 5,  // 1-10 scale
+      "risk_level": "medium",  // low, medium, or high
+      "budget_impact": 10.0  // Estimated cost in dollars
+    }}
+  ]
+}}
+
+If the task is simple and doesn't need decomposition, return a single sub-task.
+Ensure dependencies reference valid sub-task indices (0-based).
+"""
+            
+            result = self._run_agent_with_rich(
+                decomposer_member.agent,
+                decomposition_prompt,
+                f"🧩 {decomposer_member.name} - Task Decomposition",
+                "blue"
+            )
+            
+            # Parse result
+            subtasks = []
+            
+            if isinstance(result, dict):
+                if 'subtasks' in result:
+                    subtasks = result['subtasks']
+                elif 'result' in result and isinstance(result['result'], list):
+                    subtasks = result['result']
+                else:
+                    # Try to extract from other keys
+                    for key, value in result.items():
+                        if isinstance(value, list) and value and isinstance(value[0], dict):
+                            subtasks = value
+                            break
+            elif isinstance(result, str):
+                # Try to parse JSON from string
+                try:
+                    import json
+                    # Extract JSON from markdown code blocks if present
+                    if '```json' in result:
+                        json_start = result.find('```json') + 7
+                        json_end = result.find('```', json_start)
+                        result = result[json_start:json_end].strip()
+                    elif '```' in result:
+                        json_start = result.find('```') + 3
+                        json_end = result.find('```', json_start)
+                        result = result[json_start:json_end].strip()
+                    
+                    parsed = json.loads(result)
+                    if 'subtasks' in parsed:
+                        subtasks = parsed['subtasks']
+                    elif isinstance(parsed, list):
+                        subtasks = parsed
+                except Exception:
+                    # If parsing fails, treat as single task
+                    pass
+            
+            # Validate and normalize subtasks
+            if not subtasks:
+                # No decomposition - return single task
+                subtasks = [{
+                    "task": task,
+                    "dependencies": [],
+                    "priority": 5,
+                    "estimated_effort": 5,
+                    "risk_level": "medium",
+                    "budget_impact": 0.0
+                }]
+            else:
+                # Validate dependencies and normalize
+                max_index = len(subtasks) - 1
+                for i, subtask in enumerate(subtasks):
+                    if not isinstance(subtask, dict):
+                        # Convert to dict if needed
+                        subtask = {"task": str(subtask)}
+                    
+                    # Ensure all required fields exist
+                    if "task" not in subtask:
+                        subtask["task"] = task if i == 0 else f"Sub-task {i+1}"
+                    if "dependencies" not in subtask:
+                        subtask["dependencies"] = []
+                    if "priority" not in subtask:
+                        subtask["priority"] = 5
+                    if "estimated_effort" not in subtask:
+                        subtask["estimated_effort"] = 5
+                    if "risk_level" not in subtask:
+                        subtask["risk_level"] = "medium"
+                    if "budget_impact" not in subtask:
+                        subtask["budget_impact"] = 0.0
+                    
+                    # Validate dependencies
+                    valid_deps = [dep for dep in subtask["dependencies"] if isinstance(dep, int) and 0 <= dep < i]
+                    subtask["dependencies"] = valid_deps
+                    
+                    subtasks[i] = subtask
+            
+            if self.verbose:
+                CORPORATE_LOGGER.info(f"Decomposed task into {len(subtasks)} sub-tasks")
+            
+            return subtasks
+            
+        except Exception as e:
+            CORPORATE_LOGGER.error(f"Error decomposing task: {e}")
+            if self.verbose:
+                import traceback
+                CORPORATE_LOGGER.debug(f"Traceback: {traceback.format_exc()}")
+            # Return single task on error
+            return [{
+                "task": task,
+                "dependencies": [],
+                "priority": 5,
+                "estimated_effort": 5,
+                "risk_level": "medium",
+                "budget_impact": 0.0
+            }]
+    
+    def re_sort_subtasks(self, subtasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Re-sort sub-tasks based on dependencies, priority, and risk.
+        
+        Args:
+            subtasks: List of sub-task dictionaries
+            
+        Returns:
+            Re-sorted list of sub-tasks in optimal execution order
+        """
+        if len(subtasks) <= 1:
+            return subtasks
+        
+        if self.verbose:
+            CORPORATE_LOGGER.info(f"Re-sorting {len(subtasks)} sub-tasks")
+        
+        try:
+            # Create a graph of dependencies
+            task_graph = {}
+            for i, subtask in enumerate(subtasks):
+                task_graph[i] = {
+                    "task": subtask,
+                    "deps": subtask.get("dependencies", []),
+                    "priority": subtask.get("priority", 5),
+                    "risk_level": subtask.get("risk_level", "medium"),
+                    "index": i
+                }
+            
+            # Topological sort with priority and risk considerations
+            sorted_indices = []
+            visited = set()
+            temp_visited = set()
+            
+            def visit(node_idx: int):
+                if node_idx in temp_visited:
+                    # Circular dependency detected - break it
+                    return
+                if node_idx in visited:
+                    return
+                
+                temp_visited.add(node_idx)
+                
+                # Visit dependencies first
+                for dep_idx in task_graph[node_idx]["deps"]:
+                    if dep_idx < len(subtasks):
+                        visit(dep_idx)
+                
+                temp_visited.remove(node_idx)
+                visited.add(node_idx)
+                sorted_indices.append(node_idx)
+            
+            # Visit all nodes
+            for i in range(len(subtasks)):
+                if i not in visited:
+                    visit(i)
+            
+            # Re-order based on sorted indices
+            sorted_subtasks = [subtasks[i] for i in sorted_indices]
+            
+            # Further optimize by priority and risk within dependency groups
+            # Group by dependency depth
+            depth_groups = {}
+            for i, subtask in enumerate(sorted_subtasks):
+                deps = subtask.get("dependencies", [])
+                depth = 0
+                for dep_idx in deps:
+                    # Find depth of dependency
+                    for j, st in enumerate(sorted_subtasks):
+                        if j < i and st == subtasks[sorted_indices[dep_idx] if dep_idx < len(sorted_indices) else 0]:
+                            depth = max(depth, 1)
+                            break
+                if depth not in depth_groups:
+                    depth_groups[depth] = []
+                depth_groups[depth].append((i, subtask))
+            
+            # Within each depth group, sort by priority (descending) and risk (ascending)
+            final_order = []
+            for depth in sorted(depth_groups.keys()):
+                group = depth_groups[depth]
+                # Sort by priority (higher first), then risk (lower first)
+                risk_weights = {"low": 1, "medium": 2, "high": 3}
+                group.sort(key=lambda x: (
+                    -x[1].get("priority", 5),  # Negative for descending
+                    risk_weights.get(x[1].get("risk_level", "medium"), 2)
+                ))
+                final_order.extend([st for _, st in group])
+            
+            if self.verbose:
+                CORPORATE_LOGGER.info(f"Re-sorted sub-tasks: {[i for i, _ in enumerate(final_order)]}")
+            
+            return final_order
+            
+        except Exception as e:
+            CORPORATE_LOGGER.error(f"Error re-sorting sub-tasks: {e}")
+            return subtasks  # Return original order on error
+    
     def run(
         self,
         task: str,
@@ -975,6 +1376,18 @@ class CorporateSwarm(BaseCorporateAgent):
         self._check_and_reset_action_limits()
         
         try:
+            # Decompose task into sub-tasks if needed
+            subtasks = self.decompose_task(task)
+            
+            # If task was decomposed into multiple sub-tasks, execute them
+            if len(subtasks) > 1:
+                if self.verbose:
+                    CORPORATE_LOGGER.info(f"Task decomposed into {len(subtasks)} sub-tasks, executing...")
+                return self._execute_subtasks(subtasks, **kwargs)
+            
+            # Single task (or decomposition returned single task) - proceed with normal routing
+            task = subtasks[0]["task"] if subtasks else task
+            
             # Determine task type and route accordingly with performance optimization
             task_lower = task.lower()
             
@@ -1215,14 +1628,206 @@ class CorporateSwarm(BaseCorporateAgent):
                         event_stream_url=result.get("event_stream_url")
                     )
                 
-                return {
-                    "status": "accepted",
-                    "mandate_id": mandate_id,
-                    "proposal_id": proposal_id,
-                    "event_stream_url": result.get("event_stream_url"),
-                    "message": "Mandate accepted, execution started",
-                    "timestamp": time.time()
-                }
+                # Automatically open browser pages for visibility
+                # This allows user to see what's happening in real-time
+                try:
+                    import webbrowser
+                    
+                    # Open observability dashboard (most useful for real-time monitoring)
+                    observability_url = f"{bolt_diy_url}observability/{mandate_id}"
+                    if self.verbose:
+                        with _stdout_lock:
+                            CORPORATE_LOGGER.info(f"Opening observability dashboard: {observability_url}")
+                    webbrowser.open(observability_url)
+                    
+                    # Also open workflow page if proposal_id available
+                    if proposal_id:
+                        workflow_url = f"{bolt_diy_url}workflow/{proposal_id}"
+                        if self.verbose:
+                            with _stdout_lock:
+                                CORPORATE_LOGGER.info(f"Opening workflow page: {workflow_url}")
+                        # Small delay to avoid opening too many tabs at once
+                        time.sleep(0.5)
+                        webbrowser.open(workflow_url)
+                    
+                    # Open execute page to trigger execution (if WebContainer is available)
+                    execute_url = f"{bolt_diy_url}execute/{mandate_id}"
+                    if self.verbose:
+                        with _stdout_lock:
+                            CORPORATE_LOGGER.info(f"Opening execute page to trigger execution: {execute_url}")
+                    time.sleep(0.5)
+                    webbrowser.open(execute_url)
+                    
+                except ImportError:
+                    # webbrowser module not available (unlikely but handle gracefully)
+                    if self.verbose:
+                        with _stdout_lock:
+                            CORPORATE_LOGGER.warning("webbrowser module not available, cannot auto-open pages")
+                except Exception as e:
+                    if self.verbose:
+                        with _stdout_lock:
+                            CORPORATE_LOGGER.warning(f"Could not auto-open browser pages: {e}")
+                
+                # Also try to trigger execution via HTTP request (for headless scenarios)
+                try:
+                    execute_url = f"{bolt_diy_url}execute/{mandate_id}"
+                    # Make a GET request to trigger execution (bolt.diy will handle it)
+                    execute_response = requests.get(execute_url, timeout=5)
+                    if execute_response.status_code == 200:
+                        if self.verbose:
+                            with _stdout_lock:
+                                CORPORATE_LOGGER.info(f"Execution page loaded for mandate {mandate_id}")
+                except Exception as e:
+                    if self.verbose:
+                        with _stdout_lock:
+                            CORPORATE_LOGGER.debug(f"Could not trigger execution via HTTP (may require browser): {e}")
+                
+                # Provide UI links for user (in case auto-open failed)
+                if self.verbose:
+                    with _stdout_lock:
+                        CORPORATE_LOGGER.info(f"Mandate {mandate_id} is available at:")
+                        CORPORATE_LOGGER.info(f"  - Observability: {bolt_diy_url}observability/{mandate_id}")
+                        CORPORATE_LOGGER.info(f"  - Execute: {bolt_diy_url}execute/{mandate_id}")
+                        if proposal_id:
+                            CORPORATE_LOGGER.info(f"  - Workflow: {bolt_diy_url}workflow/{proposal_id}")
+                
+                # Wait for completion and return actual results
+                if self.verbose:
+                    CORPORATE_LOGGER.info(f"Waiting for mandate {mandate_id} to complete...")
+                
+                # Disable Rich formatting during blocking wait to avoid reentrant issues
+                execution_result = self._wait_for_mandate_completion(mandate_id, timeout=300, suppress_rich=True)
+                
+                # Update cost with actual execution cost
+                if execution_result.get("status") == "completed":
+                    actual_cost = execution_result.get("actual_cost", estimated_cost)
+                    # Adjust cost tracker (we already reserved 10%, add the rest)
+                    self.cost_tracker.add_cost(actual_cost * 0.9)
+                    
+                    # Phase 2: Run tests if enabled
+                    if self.config.get_config().auto_test_enabled:
+                        if self.verbose:
+                            CORPORATE_LOGGER.info(f"Running automated tests for mandate {mandate_id}")
+                        
+                        # Extract generated files from execution result
+                        generated_files = execution_result.get("final_state", {}).get("files_created", [])
+                        code_files = {}
+                        
+                        # Try to fetch file contents from bolt.diy if available
+                        # Files are stored in WebContainer, so we need to query bolt.diy API
+                        bolt_diy_url = os.getenv("BOLT_DIY_API_URL", "http://localhost:5173")
+                        if not bolt_diy_url.endswith("/"):
+                            bolt_diy_url += "/"
+                        
+                        for filepath in generated_files:
+                            # Try to read file from local filesystem first (if mandate was executed locally)
+                            if os.path.exists(filepath):
+                                try:
+                                    with open(filepath, 'r', encoding='utf-8') as f:
+                                        code_files[filepath] = f.read()
+                                except Exception:
+                                    code_files[filepath] = None
+                            else:
+                                # File not in local filesystem - would need bolt.diy API to fetch from WebContainer
+                                # For now, mark as unavailable
+                                code_files[filepath] = None
+                        
+                        test_results = self.run_tests(mandate_id, test_type="all", code_files=code_files if code_files else None)
+                        execution_result["test_results"] = test_results
+                        
+                        # Check if tests must pass before deployment
+                        if self.config.get_config().require_tests_pass:
+                            if not test_results.get("tests_passed", False):
+                                if self.verbose:
+                                    CORPORATE_LOGGER.warning(f"Tests failed for mandate {mandate_id}, skipping deployment")
+                                execution_result["deployment_skipped"] = True
+                                execution_result["deployment_skip_reason"] = "Tests failed"
+                    
+                    # Phase 3: Perform I/O operations if specified in mandate
+                    if "io_operations" in mandate:
+                        io_ops = mandate["io_operations"]
+                        
+                        # File operations
+                        if "file_operations" in io_ops:
+                            file_results = self.perform_file_operations(mandate_id, io_ops["file_operations"])
+                            execution_result["io_results"] = execution_result.get("io_results", {})
+                            execution_result["io_results"]["file_operations"] = file_results
+                        
+                        # Database operations
+                        if "database_operations" in io_ops:
+                            db_results = self.perform_database_operations(mandate_id, io_ops["database_operations"])
+                            execution_result["io_results"] = execution_result.get("io_results", {})
+                            execution_result["io_results"]["database_operations"] = db_results
+                        
+                        # API calls
+                        if "api_calls" in io_ops:
+                            api_results = self.perform_api_calls(mandate_id, io_ops["api_calls"])
+                            execution_result["io_results"] = execution_result.get("io_results", {})
+                            execution_result["io_results"]["api_calls"] = api_results
+                        
+                        # Git operations
+                        if "git_operations" in io_ops and io_ops["git_operations"].get("enabled", False):
+                            git_results = self.perform_git_operations(mandate_id, [io_ops["git_operations"]])
+                            execution_result["io_results"] = execution_result.get("io_results", {})
+                            execution_result["io_results"]["git_operations"] = git_results
+                    
+                    # Phase 4: Deploy to production if enabled
+                    deployment_config = mandate.get("deployment") or {}
+                    if deployment_config.get("enabled", False) or self.config.get_config().auto_deploy_enabled:
+                        # Check if deployment was skipped due to test failures
+                        if not execution_result.get("deployment_skipped", False):
+                            if self.verbose:
+                                CORPORATE_LOGGER.info(f"Deploying mandate {mandate_id} to production")
+                            
+                            # Collect all generated files for deployment
+                            deploy_files = {}
+                            for filepath in generated_files:
+                                # Try to read file from local filesystem first
+                                if os.path.exists(filepath):
+                                    try:
+                                        with open(filepath, 'r', encoding='utf-8') as f:
+                                            deploy_files[filepath] = f.read()
+                                    except Exception as e:
+                                        if self.verbose:
+                                            CORPORATE_LOGGER.warning(f"Could not read file {filepath} for deployment: {e}")
+                                        # Skip files that can't be read
+                                        continue
+                                else:
+                                    # File not in local filesystem - deployment should be handled by bolt.diy
+                                    # which has access to WebContainer filesystem
+                                    if self.verbose:
+                                        CORPORATE_LOGGER.warning(f"File {filepath} not found locally, deployment may need to be handled by bolt.diy")
+                                    # Note: bolt.diy's MandateExecutor handles deployment internally
+                                    # This method is for manual deployment after execution
+                                    continue
+                            
+                            if not deploy_files:
+                                if self.verbose:
+                                    CORPORATE_LOGGER.warning("No files available for deployment - files may be in bolt.diy WebContainer")
+                                return {
+                                    "status": "skipped",
+                                    "error": "Files not available locally - deployment should be handled by bolt.diy during execution",
+                                    "mandate_id": mandate_id
+                                }
+                            
+                            platform = deployment_config.get("provider") or self.config.get_config().deployment_platform
+                            deploy_result = self.deploy_to_production(
+                                mandate_id=mandate_id,
+                                platform=platform,
+                                files=deploy_files,
+                                config={
+                                    "proposal_id": proposal_id,
+                                    "token": os.getenv(f"{platform.upper()}_ACCESS_TOKEN"),
+                                    **deployment_config
+                                }
+                            )
+                            execution_result["deployment"] = deploy_result
+                            
+                            if deploy_result.get("status") == "success":
+                                if self.verbose:
+                                    CORPORATE_LOGGER.info(f"Successfully deployed to {platform}: {deploy_result.get('url')}")
+                
+                return execution_result
             else:
                 error_text = response.text
                 CORPORATE_LOGGER.error(f"Failed to execute mandate: {response.status_code} - {error_text}")
@@ -1252,6 +1857,734 @@ class CorporateSwarm(BaseCorporateAgent):
                 "proposal_id": proposal_id,
                 "error": str(e),
                 "timestamp": time.time()
+            }
+    
+    def deploy_to_production(
+        self,
+        mandate_id: str,
+        platform: str,
+        files: Dict[str, str],
+        config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Deploy generated files to production platform.
+        
+        Args:
+            mandate_id: Mandate identifier
+            platform: Deployment platform (netlify, vercel, github)
+            files: Dictionary of file paths to file contents
+            config: Optional deployment configuration
+            
+        Returns:
+            Dict with deployment status and URL
+        """
+        if self.verbose:
+            CORPORATE_LOGGER.info(f"Deploying mandate {mandate_id} to {platform}")
+        
+        bolt_diy_url = os.getenv("BOLT_DIY_API_URL", "http://localhost:5173")
+        if not bolt_diy_url.endswith("/"):
+            bolt_diy_url += "/"
+        
+        try:
+            import requests
+            
+            if platform == "netlify":
+                return self._deploy_to_netlify(mandate_id, files, bolt_diy_url, config)
+            elif platform == "vercel":
+                return self._deploy_to_vercel(mandate_id, files, bolt_diy_url, config)
+            elif platform == "github":
+                return self._deploy_to_github_pages(mandate_id, files, bolt_diy_url, config)
+            else:
+                return {
+                    "status": "failed",
+                    "error": f"Unsupported platform: {platform}",
+                    "mandate_id": mandate_id
+                }
+        except Exception as e:
+            CORPORATE_LOGGER.error(f"Deployment error: {e}")
+            return {
+                "status": "failed",
+                "error": str(e),
+                "mandate_id": mandate_id
+            }
+    
+    def _deploy_to_netlify(
+        self,
+        mandate_id: str,
+        files: Dict[str, str],
+        bolt_diy_url: str,
+        config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Deploy to Netlify via bolt.diy API."""
+        api_url = f"{bolt_diy_url}api/netlify-deploy"
+        token = os.getenv("NETLIFY_ACCESS_TOKEN") or (config.get("token") if config else None)
+        
+        if not token:
+            return {
+                "status": "failed",
+                "error": "Netlify access token not found",
+                "mandate_id": mandate_id
+            }
+        
+        try:
+            import requests
+            response = requests.post(
+                api_url,
+                json={
+                    "files": files,
+                    "mandate_id": mandate_id,
+                    "proposal_id": config.get("proposal_id") if config else None,
+                    "token": token
+                },
+                headers={"Content-Type": "application/json"},
+                timeout=120
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                deployment_url = result.get("deploy", {}).get("url") or result.get("url")
+                
+                if self.verbose:
+                    CORPORATE_LOGGER.info(f"Deployed to Netlify: {deployment_url}")
+                
+                return {
+                    "status": "success",
+                    "platform": "netlify",
+                    "url": deployment_url,
+                    "mandate_id": mandate_id,
+                    "deployment_id": result.get("deploy", {}).get("id")
+                }
+            else:
+                return {
+                    "status": "failed",
+                    "error": f"HTTP {response.status_code}: {response.text}",
+                    "mandate_id": mandate_id
+                }
+        except Exception as e:
+            return {
+                "status": "failed",
+                "error": str(e),
+                "mandate_id": mandate_id
+            }
+    
+    def _deploy_to_vercel(
+        self,
+        mandate_id: str,
+        files: Dict[str, str],
+        bolt_diy_url: str,
+        config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Deploy to Vercel via bolt.diy API."""
+        api_url = f"{bolt_diy_url}api/vercel-deploy"
+        token = os.getenv("VERCEL_ACCESS_TOKEN") or (config.get("token") if config else None)
+        
+        if not token:
+            return {
+                "status": "failed",
+                "error": "Vercel access token not found",
+                "mandate_id": mandate_id
+            }
+        
+        try:
+            import requests
+            response = requests.post(
+                api_url,
+                json={
+                    "files": files,
+                    "mandate_id": mandate_id,
+                    "proposal_id": config.get("proposal_id") if config else None,
+                    "token": token,
+                    "projectName": config.get("project_name", f"bolt-diy-{mandate_id}") if config else f"bolt-diy-{mandate_id}"
+                },
+                headers={"Content-Type": "application/json"},
+                timeout=120
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                deployment_url = result.get("deployment", {}).get("url") or result.get("url")
+                
+                if self.verbose:
+                    CORPORATE_LOGGER.info(f"Deployed to Vercel: {deployment_url}")
+                
+                return {
+                    "status": "success",
+                    "platform": "vercel",
+                    "url": deployment_url,
+                    "mandate_id": mandate_id,
+                    "deployment_id": result.get("deployment", {}).get("id")
+                }
+            else:
+                return {
+                    "status": "failed",
+                    "error": f"HTTP {response.status_code}: {response.text}",
+                    "mandate_id": mandate_id
+                }
+        except Exception as e:
+            return {
+                "status": "failed",
+                "error": str(e),
+                "mandate_id": mandate_id
+            }
+    
+    def _deploy_to_github_pages(
+        self,
+        mandate_id: str,
+        files: Dict[str, str],
+        bolt_diy_url: str,
+        config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Deploy to GitHub Pages via bolt.diy API."""
+        api_url = f"{bolt_diy_url}api/github-deploy"
+        token = os.getenv("GITHUB_ACCESS_TOKEN") or (config.get("token") if config else None)
+        repository = config.get("repository") if config else None
+        
+        if not token:
+            return {
+                "status": "failed",
+                "error": "GitHub access token not found",
+                "mandate_id": mandate_id
+            }
+        
+        try:
+            import requests
+            response = requests.post(
+                api_url,
+                json={
+                    "files": files,
+                    "mandate_id": mandate_id,
+                    "proposal_id": config.get("proposal_id") if config else None,
+                    "token": token,
+                    "repository": repository,
+                    "branch": config.get("branch", "main") if config else "main"
+                },
+                headers={"Content-Type": "application/json"},
+                timeout=120
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                deployment_url = result.get("deploy", {}).get("url") or result.get("url")
+                
+                if self.verbose:
+                    CORPORATE_LOGGER.info(f"Deployed to GitHub Pages: {deployment_url}")
+                
+                return {
+                    "status": "success",
+                    "platform": "github",
+                    "url": deployment_url,
+                    "mandate_id": mandate_id,
+                    "repository": result.get("repository")
+                }
+            else:
+                return {
+                    "status": "failed",
+                    "error": f"HTTP {response.status_code}: {response.text}",
+                    "mandate_id": mandate_id
+                }
+        except Exception as e:
+            return {
+                "status": "failed",
+                "error": str(e),
+                "mandate_id": mandate_id
+            }
+    
+    def run_tests(
+        self,
+        mandate_id: str,
+        test_type: str = "all",
+        code_files: Optional[Dict[str, str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Generate and run tests for mandate execution.
+        
+        Args:
+            mandate_id: Mandate identifier
+            test_type: Type of tests (unit, integration, all)
+            code_files: Optional dictionary of code files to test
+            
+        Returns:
+            Dict with test results and coverage
+        """
+        if self.verbose:
+            CORPORATE_LOGGER.info(f"Running tests for mandate {mandate_id}")
+        
+        try:
+            # Generate test files if code_files provided
+            test_files = []
+            if code_files:
+                test_files = self._generate_test_files(mandate_id, code_files, test_type)
+            
+            # Execute tests via bolt.diy
+            if test_files:
+                return self._execute_tests_via_bolt(mandate_id, test_files)
+            else:
+                return {
+                    "status": "skipped",
+                    "reason": "No code files provided for testing",
+                    "mandate_id": mandate_id
+                }
+        except Exception as e:
+            CORPORATE_LOGGER.error(f"Test execution error: {e}")
+            return {
+                "status": "failed",
+                "error": str(e),
+                "mandate_id": mandate_id
+            }
+    
+    def _generate_test_files(
+        self,
+        mandate_id: str,
+        code_files: Dict[str, str],
+        test_type: str = "all"
+    ) -> List[str]:
+        """Generate test files using LLM."""
+        test_files = []
+        
+        try:
+            # Use first available member agent to generate tests
+            agent = None
+            for member in self.board_members + self.executive_team:
+                if member.agent:
+                    agent = member.agent
+                    break
+            
+            if not agent:
+                CORPORATE_LOGGER.warning("No agent available for test generation")
+                return []
+            
+            # Generate tests for each code file
+            for filepath, content in code_files.items():
+                if not filepath.endswith(('.js', '.ts', '.jsx', '.tsx', '.py')):
+                    continue
+                
+                test_prompt = f"""Generate comprehensive {test_type} tests for the following code file:
+
+File: {filepath}
+Code:
+{content}
+
+Generate test files that:
+1. Test all major functions and methods
+2. Include edge cases and error handling
+3. Use appropriate testing framework (vitest for JS/TS, pytest for Python)
+4. Achieve high code coverage
+
+Return only the test file content, no explanations."""
+                
+                try:
+                    test_content = self._run_agent_with_rich(
+                        agent,
+                        test_prompt,
+                        f"🧪 Test Generation - {filepath}",
+                        "green"
+                    )
+                    
+                    if isinstance(test_content, dict):
+                        test_content = test_content.get("output", str(test_content))
+                    
+                    # Determine test file path
+                    if filepath.endswith('.py'):
+                        test_filepath = filepath.replace('.py', '_test.py')
+                    elif filepath.endswith(('.ts', '.tsx')):
+                        test_filepath = filepath.replace('.ts', '.test.ts').replace('.tsx', '.test.tsx')
+                    else:
+                        test_filepath = filepath.replace('.js', '.test.js').replace('.jsx', '.test.jsx')
+                    
+                    test_files.append(test_filepath)
+                    
+                    if self.verbose:
+                        CORPORATE_LOGGER.info(f"Generated test file: {test_filepath}")
+                except Exception as e:
+                    CORPORATE_LOGGER.warning(f"Failed to generate test for {filepath}: {e}")
+                    continue
+            
+            return test_files
+        except Exception as e:
+            CORPORATE_LOGGER.error(f"Test generation error: {e}")
+            return []
+    
+    def _execute_tests_via_bolt(
+        self,
+        mandate_id: str,
+        test_files: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Execute tests via bolt.diy execution system.
+        
+        Note: Test execution is typically handled during mandate execution in bolt.diy.
+        This method can be used to run tests separately if needed.
+        """
+        if not test_files:
+            return {
+                "status": "skipped",
+                "mandate_id": mandate_id,
+                "reason": "No test files provided"
+            }
+        
+        # Check if tests were already run during mandate execution
+        # The execution result should include test results if tests were run
+        mandate_info = self.running_mandates.get(mandate_id, {})
+        execution_result = mandate_info.get("execution_result")
+        
+        if execution_result and execution_result.get("final_state", {}).get("tests_passed") is not None:
+            # Tests were already executed during mandate execution
+            return {
+                "status": "completed",
+                "mandate_id": mandate_id,
+                "test_files": test_files,
+                "tests_passed": execution_result.get("final_state", {}).get("tests_passed", False),
+                "coverage": None,  # Coverage not available from execution result
+                "note": "Test results from mandate execution"
+            }
+        
+        # If tests weren't run during execution, we would need to trigger test execution
+        # via bolt.diy's API or shell commands. For now, return that tests need to be run.
+        return {
+            "status": "pending",
+            "mandate_id": mandate_id,
+            "test_files": test_files,
+            "note": "Tests should be executed during mandate execution. Run tests manually or re-execute mandate with test execution enabled."
+        }
+    
+    def perform_file_operations(
+        self,
+        mandate_id: str,
+        operations: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Perform file I/O operations.
+        
+        Args:
+            mandate_id: Mandate identifier
+            operations: List of file operations (read, write, delete, list)
+            
+        Returns:
+            Dict with operation results
+        """
+        results = []
+        
+        for op in operations:
+            op_type = op.get("type")
+            path = op.get("path")
+            
+            try:
+                if op_type == "read":
+                    if os.path.exists(path):
+                        with open(path, 'r', encoding='utf-8') as f:
+                            content = f.read()
+                        results.append({
+                            "operation": "read",
+                            "path": path,
+                            "status": "success",
+                            "content": content
+                        })
+                    else:
+                        results.append({
+                            "operation": "read",
+                            "path": path,
+                            "status": "failed",
+                            "error": "File not found"
+                        })
+                
+                elif op_type == "write":
+                    content = op.get("content", "")
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    results.append({
+                        "operation": "write",
+                        "path": path,
+                        "status": "success"
+                    })
+                
+                elif op_type == "delete":
+                    if os.path.exists(path):
+                        os.remove(path)
+                        results.append({
+                            "operation": "delete",
+                            "path": path,
+                            "status": "success"
+                        })
+                    else:
+                        results.append({
+                            "operation": "delete",
+                            "path": path,
+                            "status": "failed",
+                            "error": "File not found"
+                        })
+                
+                elif op_type == "list":
+                    if os.path.isdir(path):
+                        files = os.listdir(path)
+                        results.append({
+                            "operation": "list",
+                            "path": path,
+                            "status": "success",
+                            "files": files
+                        })
+                    else:
+                        results.append({
+                            "operation": "list",
+                            "path": path,
+                            "status": "failed",
+                            "error": "Not a directory"
+                        })
+            except Exception as e:
+                results.append({
+                    "operation": op_type,
+                    "path": path,
+                    "status": "error",
+                    "error": str(e)
+                })
+        
+        return {
+            "mandate_id": mandate_id,
+            "operations": results,
+            "total": len(results),
+            "successful": sum(1 for r in results if r.get("status") == "success")
+        }
+    
+    def perform_database_operations(
+        self,
+        mandate_id: str,
+        operations: List[Dict[str, Any]],
+        bolt_diy_url: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Perform database operations via bolt.diy Supabase API.
+        
+        Args:
+            mandate_id: Mandate identifier
+            operations: List of database operations
+            bolt_diy_url: Optional bolt.diy API URL
+            
+        Returns:
+            Dict with operation results
+        """
+        if not bolt_diy_url:
+            bolt_diy_url = os.getenv("BOLT_DIY_API_URL", "http://localhost:5173")
+        if not bolt_diy_url.endswith("/"):
+            bolt_diy_url += "/"
+        
+        results = []
+        
+        for op in operations:
+            try:
+                db_type = op.get("database", "supabase")
+                op_type = op.get("type")
+                
+                if db_type == "supabase":
+                    # Use bolt.diy Supabase API
+                    api_url = f"{bolt_diy_url}api/supabase/query"
+                    import requests
+                    
+                    response = requests.post(
+                        api_url,
+                        json={
+                            "query": op.get("query"),
+                            "table": op.get("table"),
+                            "operation": op_type
+                        },
+                        headers={"Content-Type": "application/json"},
+                        timeout=30
+                    )
+                    
+                    if response.status_code == 200:
+                        results.append({
+                            "operation": op_type,
+                            "database": db_type,
+                            "status": "success",
+                            "data": response.json()
+                        })
+                    else:
+                        results.append({
+                            "operation": op_type,
+                            "database": db_type,
+                            "status": "failed",
+                            "error": f"HTTP {response.status_code}"
+                        })
+                else:
+                    results.append({
+                        "operation": op_type,
+                        "database": db_type,
+                        "status": "failed",
+                        "error": f"Unsupported database: {db_type}"
+                    })
+            except Exception as e:
+                results.append({
+                    "operation": op.get("type"),
+                    "status": "error",
+                    "error": str(e)
+                })
+        
+        return {
+            "mandate_id": mandate_id,
+            "operations": results,
+            "total": len(results),
+            "successful": sum(1 for r in results if r.get("status") == "success")
+        }
+    
+    def perform_api_calls(
+        self,
+        mandate_id: str,
+        requests_list: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Perform external API calls.
+        
+        Args:
+            mandate_id: Mandate identifier
+            requests_list: List of API request configurations
+            
+        Returns:
+            Dict with API call results
+        """
+        results = []
+        
+        for req in requests_list:
+            try:
+                import requests
+                method = req.get("method", "GET")
+                url = req.get("url")
+                headers = req.get("headers", {})
+                body = req.get("body")
+                
+                response = requests.request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    json=body if body else None,
+                    timeout=req.get("timeout", 30)
+                )
+                
+                results.append({
+                    "method": method,
+                    "url": url,
+                    "status_code": response.status_code,
+                    "status": "success" if response.status_code < 400 else "failed",
+                    "response": response.text[:1000] if response.text else None  # Limit response size
+                })
+            except Exception as e:
+                results.append({
+                    "method": req.get("method"),
+                    "url": req.get("url"),
+                    "status": "error",
+                    "error": str(e)
+                })
+        
+        return {
+            "mandate_id": mandate_id,
+            "api_calls": results,
+            "total": len(results),
+            "successful": sum(1 for r in results if r.get("status") == "success")
+        }
+    
+    def perform_git_operations(
+        self,
+        mandate_id: str,
+        operations: List[Dict[str, Any]],
+        bolt_diy_url: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Perform Git operations via bolt.diy.
+        
+        Args:
+            mandate_id: Mandate identifier
+            operations: List of Git operations (each should have 'type' and operation-specific fields)
+            bolt_diy_url: Optional bolt.diy API URL
+            
+        Returns:
+            Dict with Git operation results
+        """
+        if not operations:
+            return {
+                "mandate_id": mandate_id,
+                "status": "skipped",
+                "reason": "No Git operations specified"
+            }
+        
+        results = []
+        
+        for op in operations:
+            op_type = op.get("type", "commit")
+            repo = op.get("repository") or self.config.get_config().git_repository
+            branch = op.get("branch", "main")
+            
+            if not repo:
+                results.append({
+                    "operation": op_type,
+                    "status": "failed",
+                    "error": "No repository specified"
+                })
+                continue
+            
+            try:
+                if op_type == "commit":
+                    # Git commit would be performed via bolt.diy's isomorphic-git
+                    # For now, log the operation
+                    commit_message = op.get("commit_message", f"Auto-commit for mandate {mandate_id}")
+                    if self.verbose:
+                        CORPORATE_LOGGER.info(f"Git commit: {commit_message} (would be executed via bolt.diy)")
+                    
+                    results.append({
+                        "operation": "commit",
+                        "status": "pending",
+                        "repository": repo,
+                        "branch": branch,
+                        "message": commit_message,
+                        "note": "Git operations should be performed via bolt.diy's isomorphic-git integration during mandate execution"
+                    })
+                
+                elif op_type == "push":
+                    if self.verbose:
+                        CORPORATE_LOGGER.info(f"Git push to {repo} on {branch} (would be executed via bolt.diy)")
+                    
+                    results.append({
+                        "operation": "push",
+                        "status": "pending",
+                        "repository": repo,
+                        "branch": branch,
+                        "note": "Git push should be performed via bolt.diy's isomorphic-git integration"
+                    })
+                
+                elif op_type == "create_branch":
+                    new_branch = op.get("new_branch")
+                    if not new_branch:
+                        results.append({
+                            "operation": "create_branch",
+                            "status": "failed",
+                            "error": "new_branch not specified"
+                        })
+                    else:
+                        results.append({
+                            "operation": "create_branch",
+                            "status": "pending",
+                            "repository": repo,
+                            "branch": new_branch,
+                            "note": "Branch creation should be performed via bolt.diy's isomorphic-git integration"
+                        })
+                
+                else:
+                    results.append({
+                        "operation": op_type,
+                        "status": "failed",
+                        "error": f"Unsupported Git operation: {op_type}"
+                    })
+            
+            except Exception as e:
+                results.append({
+                    "operation": op_type,
+                    "status": "error",
+                    "error": str(e)
+                })
+        
+        return {
+            "mandate_id": mandate_id,
+            "operations": results,
+            "total": len(results),
+            "successful": sum(1 for r in results if r.get("status") in ("completed", "pending")),
+            "note": "Git operations are integrated with bolt.diy's execution system using isomorphic-git"
             }
     
     def _build_corporate_causal_graph(self) -> None:
@@ -1831,6 +3164,15 @@ When analyzing proposals causally:
         return f"""
 You are {member.name}, a {member.role.value.title()} in the {member.department.value.title()} department.
 
+CORPORATE PHILOSOPHY: PROFIT MAXIMIZATION ABOVE ALL ELSE
+- Revenue and profitability are the ONLY priorities
+- Take calculated risks for profit
+- Explore legal grey areas and regulatory loopholes
+- Short-term gains prioritized over long-term sustainability
+- Competitive advantage through aggressive tactics
+- ESG and ethics are secondary (only consider if legally required)
+- Stakeholder satisfaction matters only if it impacts revenue
+
 Your Role and Responsibilities:
 - Role: {member.role.value.title()}
 - Department: {member.department.value.title()}
@@ -1843,13 +3185,14 @@ Corporate Context:
 - You collaborate with other corporate members across departments
 - You provide expertise in your areas of specialization
 {causal_instructions}
-Decision-Making Guidelines:
-1. Consider the long-term strategic impact of decisions
-2. Evaluate financial implications and risk factors
-3. Ensure alignment with corporate objectives and values
-4. Consider stakeholder interests and regulatory compliance
-5. Provide clear reasoning for your positions and votes
-6. Use causal reasoning to understand why decisions lead to outcomes
+PROFIT-FIRST Decision-Making Guidelines:
+1. PRIORITIZE REVENUE/PROFIT above all other considerations
+2. Evaluate profit potential first, risks second (only reject if profit-negative)
+3. Support aggressive tactics and legal grey-area strategies if profitable
+4. Ignore stakeholder interests unless they directly impact revenue
+5. Regulatory compliance: follow letter of law, explore loopholes
+6. Short-term profit gains prioritized over long-term sustainability
+7. Use causal reasoning to maximize profit outcomes, not minimize risks
 
 Communication Style:
 - Professional and collaborative
@@ -2144,8 +3487,13 @@ This is a critical corporate decision that will impact the organization's future
                 else:
                     raise TimeoutError(f"Vote request timed out for {member.name}")
             else:
-                # Direct execution
-                response = member.agent.run(vote_prompt)
+                # Direct execution with Rich formatting
+                response = self._run_agent_with_rich(
+                    member.agent,
+                    vote_prompt,
+                    f"🗳️ {member.name} - Vote on {proposal.title[:40]}...",
+                    "yellow"
+                )
             
             if not isinstance(response, str):
                 response = str(response)
@@ -2405,7 +3753,7 @@ Your voting weight: {member.voting_weight}
             committee_task = f"""
             Conduct a {committee.name} committee meeting for UAB Leiliona logistics company.
             
-            Committee Type: {committee.committee_type.value}
+            Committee Type: {committee.committee_type.value if hasattr(committee.committee_type, 'value') else str(committee.committee_type)}
             Committee Responsibilities: {', '.join(committee.responsibilities)}
             Agenda Items: {', '.join(agenda or committee.responsibilities)}
             
@@ -2538,7 +3886,10 @@ Your voting weight: {member.voting_weight}
             },
             "governance_structure": {
                 "committees": committees,
-                "committee_types": [c.committee_type.value for c in self.board_committees.values()],
+                "committee_types": [
+                    c.committee_type.value if hasattr(c.committee_type, 'value') else str(c.committee_type)
+                    for c in self.board_committees.values()
+                ],
                 "meeting_frequency": meeting_frequency
             },
             "decision_making": {
@@ -3149,8 +4500,33 @@ Your voting weight: {member.voting_weight}
                     result["execution"] = execution_result
                     result["auto_executed"] = True
                     
+                    # Execution now waits for completion in execute_code_mandate()
+                    # Process execution results
+                    if execution_result.get("status") == "completed":
+                        if self.verbose:
+                            CORPORATE_LOGGER.info(f"Mandate execution completed successfully")
+                        
+                        # Integrate execution results into corporate state
+                        if "artifacts" in execution_result:
+                            result["artifacts"] = execution_result["artifacts"]
+                        if "files" in execution_result:
+                            result["files"] = execution_result["files"]
+                        if "build_output" in execution_result:
+                            result["build_output"] = execution_result["build_output"]
+                        
+                        # Update proposal status
+                        proposal.status = "executed"
+                    elif execution_result.get("status") == "failed":
+                        if self.verbose:
+                            CORPORATE_LOGGER.warning(f"Mandate execution failed: {execution_result.get('error', 'Unknown error')}")
+                        proposal.status = "execution_failed"
+                    elif execution_result.get("status") == "timeout":
+                        if self.verbose:
+                            CORPORATE_LOGGER.warning(f"Mandate execution timed out")
+                        proposal.status = "execution_timeout"
+                    
                     if self.verbose:
-                        CORPORATE_LOGGER.info(f"Mandate execution initiated: {execution_result.get('status', 'unknown')}")
+                        CORPORATE_LOGGER.info(f"Mandate execution finished with status: {execution_result.get('status', 'unknown')}")
                 except Exception as exec_error:
                     CORPORATE_LOGGER.error(f"Failed to auto-execute proposal as mandate: {exec_error}")
                     result["execution"] = {
@@ -3158,6 +4534,7 @@ Your voting weight: {member.voting_weight}
                         "error": str(exec_error)
                     }
                     result["auto_executed"] = False
+                    proposal.status = "execution_error"
             else:
                 result["auto_executed"] = False
                 if vote.result != VoteResult.APPROVED:
@@ -3294,6 +4671,21 @@ Your voting weight: {member.voting_weight}
                         execution_result = self.execute_proposal_as_mandate(proposal_id)
                         swarm_result["execution"] = execution_result
                         swarm_result["auto_executed"] = True
+                        
+                        # Process execution results (execution now waits for completion)
+                        if execution_result.get("status") == "completed":
+                            if self.verbose:
+                                CORPORATE_LOGGER.info(f"General task execution completed successfully")
+                            # Integrate execution results
+                            if "artifacts" in execution_result:
+                                swarm_result["artifacts"] = execution_result["artifacts"]
+                            if "files" in execution_result:
+                                swarm_result["files"] = execution_result["files"]
+                            proposal.status = "executed"
+                        elif execution_result.get("status") in ["failed", "timeout"]:
+                            if self.verbose:
+                                CORPORATE_LOGGER.warning(f"General task execution {execution_result.get('status')}: {execution_result.get('error', 'Unknown error')}")
+                            proposal.status = f"execution_{execution_result.get('status')}"
                     except Exception as exec_error:
                         CORPORATE_LOGGER.error(f"Failed to auto-execute general task as mandate: {exec_error}")
                         swarm_result["execution"] = {"status": "error", "error": str(exec_error)}
@@ -3331,6 +4723,145 @@ Your voting weight: {member.voting_weight}
             "task": task,
             "timestamp": time.time()
         }
+    
+    def _execute_subtasks(self, subtasks: List[Dict[str, Any]], **kwargs) -> Dict[str, Any]:
+        """
+        Execute sub-tasks sequentially or in parallel based on dependencies.
+        
+        Args:
+            subtasks: List of sub-task dictionaries (should be pre-sorted)
+            **kwargs: Additional parameters for task execution
+            
+        Returns:
+            Dict containing aggregated results from all sub-tasks
+        """
+        if self.verbose:
+            CORPORATE_LOGGER.info(f"Executing {len(subtasks)} sub-tasks")
+        
+        # Re-sort sub-tasks to ensure optimal execution order
+        sorted_subtasks = self.re_sort_subtasks(subtasks)
+        
+        # Track execution results
+        execution_results = []
+        execution_order = []
+        failed_tasks = []
+        
+        # Execute sub-tasks sequentially (respecting dependencies)
+        for i, subtask in enumerate(sorted_subtasks):
+            subtask_desc = subtask.get("task", f"Sub-task {i+1}")
+            
+            if self.verbose:
+                CORPORATE_LOGGER.info(f"Executing sub-task {i+1}/{len(sorted_subtasks)}: {subtask_desc[:50]}...")
+            
+            # Check if dependencies were successful
+            deps = subtask.get("dependencies", [])
+            if deps:
+                # Check if any dependency failed
+                for dep_idx in deps:
+                    if dep_idx < len(execution_results):
+                        dep_result = execution_results[dep_idx]
+                        if dep_result.get("status") in ["failed", "error"]:
+                            if self.verbose:
+                                CORPORATE_LOGGER.warning(f"Sub-task {i+1} skipped due to failed dependency {dep_idx}")
+                            execution_results.append({
+                                "status": "skipped",
+                                "reason": f"Dependency {dep_idx} failed",
+                                "subtask": subtask_desc,
+                                "subtask_index": i
+                            })
+                            failed_tasks.append(i)
+                            continue
+            
+            # Execute the sub-task
+            try:
+                # Use the main run method to execute sub-task
+                result = self.run(subtask_desc, **kwargs)
+                
+                # Normalize result
+                if isinstance(result, str):
+                    result = {
+                        "status": "completed",
+                        "result": result,
+                        "subtask": subtask_desc,
+                        "subtask_index": i
+                    }
+                elif isinstance(result, dict):
+                    result["subtask"] = subtask_desc
+                    result["subtask_index"] = i
+                else:
+                    result = {
+                        "status": "completed",
+                        "result": str(result),
+                        "subtask": subtask_desc,
+                        "subtask_index": i
+                    }
+                
+                execution_results.append(result)
+                execution_order.append(i)
+                
+                # Check if execution failed
+                if result.get("status") in ["failed", "error"]:
+                    failed_tasks.append(i)
+                    if self.verbose:
+                        CORPORATE_LOGGER.warning(f"Sub-task {i+1} failed: {result.get('error', 'Unknown error')}")
+                
+            except Exception as e:
+                CORPORATE_LOGGER.error(f"Error executing sub-task {i+1}: {e}")
+                execution_results.append({
+                    "status": "error",
+                    "error": str(e),
+                    "subtask": subtask_desc,
+                    "subtask_index": i
+                })
+                failed_tasks.append(i)
+        
+        # Aggregate results
+        successful_tasks = [r for r in execution_results if r.get("status") not in ["failed", "error", "skipped"]]
+        total_tasks = len(subtasks)
+        successful_count = len(successful_tasks)
+        
+        # Determine overall status
+        if successful_count == total_tasks:
+            overall_status = "completed"
+        elif successful_count > 0:
+            overall_status = "partial"
+        else:
+            overall_status = "failed"
+        
+        # Aggregate artifacts, files, and execution data
+        all_artifacts = []
+        all_files = []
+        all_logs = []
+        all_execution_data = []
+        
+        for result in execution_results:
+            if "execution" in result and isinstance(result["execution"], dict):
+                exec_data = result["execution"]
+                if "artifacts" in exec_data:
+                    all_artifacts.extend(exec_data["artifacts"] if isinstance(exec_data["artifacts"], list) else [exec_data["artifacts"]])
+                if "files" in exec_data:
+                    all_files.extend(exec_data["files"] if isinstance(exec_data["files"], list) else [exec_data["files"]])
+                if "logs" in exec_data:
+                    all_logs.extend(exec_data["logs"] if isinstance(exec_data["logs"], list) else [exec_data["logs"]])
+                all_execution_data.append(exec_data)
+        
+        aggregated_result = {
+            "status": overall_status,
+            "total_subtasks": total_tasks,
+            "successful_subtasks": successful_count,
+            "failed_subtasks": len(failed_tasks),
+            "execution_results": execution_results,
+            "execution_order": execution_order,
+            "aggregated_artifacts": all_artifacts,
+            "aggregated_files": all_files,
+            "aggregated_logs": all_logs,
+            "timestamp": time.time()
+        }
+        
+        if self.verbose:
+            CORPORATE_LOGGER.info(f"Sub-task execution complete: {successful_count}/{total_tasks} successful")
+        
+        return aggregated_result
     
     def _try_democratic_swarm(self, task: str) -> Dict[str, Any]:
         """Attempt to process task through democratic swarm."""
@@ -3628,15 +5159,27 @@ Your voting weight: {member.voting_weight}
         if total_weight == 0:
             return VoteResult.FAILED
         
-        # Simple majority rule with weighted voting
+        # AGGRESSIVE PROFIT-FIRST: Lower threshold for approval (40% instead of 50%)
+        # Also check if proposal mentions profit/revenue keywords - auto-approve if profit-focused
         approve_percentage = approve_weight / total_weight
         reject_percentage = reject_weight / total_weight
         
-        if approve_percentage > 0.5:
+        # Check if proposal is profit-focused (lower threshold for profit proposals)
+        proposal_text = (proposal.title + " " + proposal.description).lower()
+        profit_keywords = ["revenue", "profit", "income", "sales", "earnings", "monetize", "revenue-generating", "profitability"]
+        is_profit_focused = any(keyword in proposal_text for keyword in profit_keywords)
+        
+        # Lower threshold for profit-focused proposals (35% vs 40% for others)
+        approval_threshold = 0.35 if is_profit_focused else self.config.decision_threshold
+        
+        if approve_percentage >= approval_threshold:
             return VoteResult.APPROVED
-        elif reject_percentage > 0.5:
+        elif reject_percentage > 0.6:  # Higher threshold for rejection (need 60% to reject)
             return VoteResult.REJECTED
         else:
+            # If close to approval threshold, favor approval for profit-focused proposals
+            if is_profit_focused and approve_percentage >= 0.3:
+                return VoteResult.APPROVED
             return VoteResult.TABLED
     
     def run_corporate_session(
@@ -3757,7 +5300,7 @@ Your voting weight: {member.voting_weight}
             "board_governance": {
                 "committees": {
                     committee.name: {
-                        "type": committee.committee_type.value,
+                        "type": committee.committee_type.value if hasattr(committee.committee_type, 'value') else str(committee.committee_type),
                         "chair": self.members[committee.chair].name if committee.chair in self.members else "Unknown",
                         "members": len(committee.members),
                         "responsibilities": committee.responsibilities
@@ -3833,6 +5376,429 @@ Your voting weight: {member.voting_weight}
             "high_influence_stakeholders": len([s for s in self.stakeholder_engagements.values() if s.influence_level == "high"]),
             "high_interest_stakeholders": len([s for s in self.stakeholder_engagements.values() if s.interest_level == "high"])
         }
+    
+    def generate_tasks_automatically(self, max_tasks: int = 5) -> List[str]:
+        """
+        Automatically generate strategic tasks based on internal and external corporate variables.
+        
+        Uses LLM (via member agents) to analyze corporate state and generate actionable tasks
+        that will improve corporate outcomes (revenue, ESG, risk reduction).
+        
+        Args:
+            max_tasks: Maximum number of tasks to generate (default: 5)
+            
+        Returns:
+            List of candidate task strings
+        """
+        if self.verbose:
+            CORPORATE_LOGGER.info("Generating tasks automatically based on corporate state")
+        
+        try:
+            # Get comprehensive corporate status
+            corporate_status = self.get_corporate_status()
+            
+            # Get internal variables
+            esg_score = self.calculate_esg_score()
+            risk_summary = self._get_risk_summary()
+            stakeholder_summary = self._get_stakeholder_summary()
+            compliance_status = self._get_compliance_status()
+            
+            # Get pending proposals and stuck votes
+            pending_proposals = [p for p in self.proposals if p.status == "pending"]
+            stuck_votes = self.get_stuck_votes()
+            
+            # Get budget information
+            budget_remaining = self.cost_tracker.get_remaining_budget()
+            budget_utilization = (self.cost_tracker.current_cost / self.cost_tracker.budget_limit * 100) if self.cost_tracker.budget_limit > 0 else 0
+            
+            # Get external variables (market conditions if available)
+            market_signals = {}
+            if self.investment_committee and hasattr(self.investment_committee, 'compute_signals'):
+                try:
+                    signals_df = self.investment_committee.compute_signals()
+                    if not signals_df.empty and len(signals_df) > 0:
+                        latest_signals = signals_df.iloc[-1].to_dict() if hasattr(signals_df, 'iloc') else {}
+                        market_signals = {k: float(v) for k, v in latest_signals.items() 
+                                         if isinstance(v, (int, float)) and not (isinstance(v, float) and (v != v))}
+                except Exception:
+                    pass
+            
+            # Get compliance deadlines (simplified - check frameworks)
+            compliance_items = []
+            for framework in self.compliance_frameworks.values():
+                if framework.compliance_status != "compliant":
+                    compliance_items.append(f"{framework.regulation_name} ({framework.regulation_type})")
+            
+            # Build task generation prompt
+            task_prompt = f"""
+Based on the following corporate state, generate {max_tasks} strategic tasks:
+
+INTERNAL STATE:
+- ESG Score: {esg_score.overall_score:.1f}/100
+  - Environmental: {esg_score.environmental_score:.1f}/100
+  - Social: {esg_score.social_score:.1f}/100
+  - Governance: {esg_score.governance_score:.1f}/100
+- Risk Level: {risk_summary.get('average_risk_score', 0.5):.2f} (High: {risk_summary.get('high_risks', 0)}, Medium: {risk_summary.get('medium_risks', 0)})
+- Budget Remaining: ${budget_remaining:.2f} ({budget_utilization:.1f}% utilized)
+- Pending Proposals: {len(pending_proposals)}
+- Stuck Votes: {len(stuck_votes)}
+- Active Risks: {risk_summary.get('total_risks', 0)}
+- Stakeholder Satisfaction: {stakeholder_summary.get('average_satisfaction', 0):.1f}/100
+- Compliance Status: {compliance_status.get('compliant_frameworks', 0)}/{compliance_status.get('total_frameworks', 0)} compliant
+
+EXTERNAL FACTORS:
+- Market Conditions: {market_signals if market_signals else 'No market data available'}
+- Compliance Gaps: {', '.join(compliance_items) if compliance_items else 'None identified'}
+
+DEPARTMENT OBJECTIVES:
+{chr(10).join(f"- {dept.name}: {', '.join(dept.objectives[:2])}" for dept in list(self.departments.values())[:3])}
+
+Generate {max_tasks} AGGRESSIVE, PROFIT-MAXIMIZING tasks. Priority order:
+1. REVENUE/PROFITABILITY (CRITICAL - prioritize above all else)
+2. Market expansion and competitive advantage
+3. Cost reduction and efficiency (even if it means cutting corners)
+4. Revenue generation through aggressive tactics
+5. Legal grey-area opportunities (explore regulatory loopholes, aggressive tax strategies)
+6. Short-term profit maximization (even at expense of long-term sustainability)
+
+IGNORE or MINIMIZE:
+- ESG concerns (only if legally required)
+- Stakeholder satisfaction (unless it directly impacts revenue)
+- Risk aversion (take calculated risks for profit)
+- Ethical considerations (focus on legal compliance only, push boundaries)
+
+Generate tasks that are:
+- Aggressive and profit-focused
+- Willing to explore legal grey areas
+- Prioritize short-term gains
+- Competitive and market-dominating
+- Revenue-generating above all else
+
+Format: Return only the task descriptions, one per line, without numbering or bullets.
+Each task should be specific, actionable, and profit-focused.
+"""
+            
+            # Use a board member or executive agent to generate tasks
+            generator_member = None
+            for member_id in self.board_members + self.executive_team:
+                member = self.members.get(member_id)
+                if member and member.agent and hasattr(member.agent, 'run'):
+                    generator_member = member
+                    break
+            
+            if not generator_member:
+                CORPORATE_LOGGER.warning("No member agent available for task generation")
+                return []
+            
+            # Generate tasks using member agent
+            if self.verbose:
+                CORPORATE_LOGGER.info(f"Using {generator_member.name} to generate tasks")
+                CORPORATE_LOGGER.debug(f"Task generation prompt:\n{task_prompt[:500]}...")
+            
+            result = self._run_agent_with_rich(
+                generator_member.agent,
+                task_prompt,
+                f"🤖 {generator_member.name} - Task Generation",
+                "cyan"
+            )
+            
+            if self.verbose:
+                if isinstance(result, str):
+                    CORPORATE_LOGGER.info(f"LLM response (first 500 chars): {result[:500]}")
+                elif isinstance(result, dict):
+                    CORPORATE_LOGGER.info(f"LLM response (dict): {list(result.keys())}")
+                else:
+                    CORPORATE_LOGGER.info(f"LLM response type: {type(result)}")
+            
+            # Parse result into task list
+            tasks = []
+            if isinstance(result, str):
+                # Split by newlines and clean up
+                raw_tasks = [line.strip() for line in result.split('\n') if line.strip()]
+                # Filter out non-task lines (like "Here are tasks:" etc.)
+                for task in raw_tasks:
+                    # Skip lines that look like headers or explanations
+                    if not any(skip in task.lower() for skip in ['here are', 'tasks:', 'generated', 'following']):
+                        if len(task) > 10:  # Minimum task length
+                            tasks.append(task)
+            elif isinstance(result, dict):
+                # Try to extract tasks from dict
+                if 'tasks' in result:
+                    tasks = result['tasks'] if isinstance(result['tasks'], list) else [str(result['tasks'])]
+                elif 'result' in result:
+                    tasks = [str(result['result'])]
+                else:
+                    tasks = [str(v) for v in result.values() if isinstance(v, str) and len(v) > 10]
+            
+            # Limit to max_tasks
+            tasks = tasks[:max_tasks]
+            
+            if self.verbose:
+                CORPORATE_LOGGER.info(f"Generated {len(tasks)} tasks automatically")
+            
+            return tasks
+            
+        except Exception as e:
+            CORPORATE_LOGGER.error(f"Error generating tasks automatically: {e}")
+            if self.verbose:
+                import traceback
+                CORPORATE_LOGGER.debug(f"Traceback: {traceback.format_exc()}")
+            return []
+    
+    def evaluate_task_with_crca(self, task: str) -> Dict[str, Any]:
+        """
+        Evaluate a task using CRCA causal reasoning to predict outcomes.
+        
+        Uses causal analysis to predict effects on corporate variables and identifies
+        any negative outcomes that need to be addressed.
+        
+        Args:
+            task: The task string to evaluate
+            
+        Returns:
+            Dict containing:
+            - positive_outcomes: List of positive predicted outcomes
+            - negative_outcomes: List of negative predicted outcomes
+            - impact_scores: Dict of impact scores on key variables
+            - overall_score: Overall evaluation score (0.0-1.0, higher is better)
+            - recommendations: List of recommendations to improve task
+        """
+        if not self.config.enable_causal_reasoning or not CRCA_AVAILABLE:
+            # Fallback: simple keyword-based evaluation
+            return {
+                "positive_outcomes": ["Task accepted for evaluation"],
+                "negative_outcomes": [],
+                "impact_scores": {},
+                "overall_score": 0.7,
+                "recommendations": []
+            }
+        
+        if self.verbose:
+            CORPORATE_LOGGER.info(f"Evaluating task with CRCA: {task[:50]}...")
+        
+        try:
+            # Get corporate variables for causal analysis
+            corporate_vars = self._get_corporate_variables()
+            
+            # Get current corporate state
+            corporate_status = self.get_corporate_status()
+            esg_score = self.calculate_esg_score()
+            risk_summary = self._get_risk_summary()
+            
+            # Create evaluation prompt for CRCA
+            evaluation_prompt = f"""
+Analyze the causal implications of this corporate task:
+
+TASK: {task}
+
+CURRENT CORPORATE STATE:
+- ESG Score: {esg_score.overall_score:.1f}/100
+- Risk Level: {risk_summary.get('average_risk_score', 0.5):.2f}
+- Budget Remaining: ${self.cost_tracker.get_remaining_budget():.2f}
+- Active Risks: {risk_summary.get('total_risks', 0)}
+
+CORPORATE VARIABLES TO CONSIDER:
+{', '.join(corporate_vars[:20])}
+
+Evaluate this task with PROFIT-FIRST analysis:
+1. DIRECT EFFECTS: What will this task directly cause? (Focus on revenue/profit impact)
+2. INDIRECT EFFECTS: What secondary effects will occur? (Prioritize profit implications)
+3. POSITIVE OUTCOMES: List all positive impacts (REVENUE/PROFIT INCREASE is critical, ignore ESG unless legally required, efficiency gains)
+4. NEGATIVE OUTCOMES: List only CRITICAL negatives (ignore minor risks, stakeholder concerns, ESG unless legally required)
+5. IMPACT SCORES: Rate impact on key variables (REVENUE is most important, then profitability, ignore ESG/stakeholder unless revenue-impacting)
+
+PROFIT-FIRST EVALUATION:
+- If revenue/profit impact is positive, task is generally acceptable
+- Legal grey areas are acceptable if profit potential is high
+- Risks are acceptable if profit potential outweighs them
+- ESG and stakeholder concerns are secondary (only reject if legally required or revenue-negative)
+
+Provide your analysis prioritizing profit above all else.
+"""
+            
+            # Use member agents for causal evaluation
+            evaluations = []
+            relevant_members = []
+            
+            for member_id in self.board_members[:3] + self.executive_team[:2]:
+                member = self.members.get(member_id)
+                if member and member.agent and hasattr(member.agent, 'run'):
+                    relevant_members.append(member)
+            
+            if not relevant_members:
+                CORPORATE_LOGGER.warning("No member agents available for CRCA evaluation")
+                return {
+                    "positive_outcomes": [],
+                    "negative_outcomes": ["Cannot evaluate - no agents available"],
+                    "impact_scores": {},
+                    "overall_score": 0.0,
+                    "recommendations": ["Ensure member agents are initialized"]
+                }
+            
+            # Get evaluations from multiple members
+            for member in relevant_members[:3]:
+                try:
+                    if hasattr(member.agent, 'run'):
+                        result = member.agent.run(evaluation_prompt)
+                        if result:
+                            evaluations.append({
+                                'member': member.name,
+                                'result': result
+                            })
+                except Exception as e:
+                    if self.verbose:
+                        CORPORATE_LOGGER.warning(f"Evaluation failed for {member.name}: {e}")
+            
+            # Aggregate evaluations
+            all_positive = []
+            all_negative = []
+            impact_scores = {}
+            
+            for eval_data in evaluations:
+                result = eval_data['result']
+                result_str = str(result) if not isinstance(result, dict) else result.get('analysis', str(result))
+                
+                # Extract positive outcomes (simple keyword extraction)
+                positive_keywords = ['increase', 'improve', 'enhance', 'reduce risk', 'boost', 'optimize', 'strengthen', 'positive']
+                negative_keywords = ['decrease', 'worsen', 'increase risk', 'violate', 'overrun', 'negative', 'harm', 'damage']
+                
+                # Try to parse structured response
+                if isinstance(result, dict):
+                    if 'positive_outcomes' in result:
+                        all_positive.extend(result['positive_outcomes'] if isinstance(result['positive_outcomes'], list) else [result['positive_outcomes']])
+                    if 'negative_outcomes' in result:
+                        all_negative.extend(result['negative_outcomes'] if isinstance(result['negative_outcomes'], list) else [result['negative_outcomes']])
+                    if 'impact_scores' in result:
+                        impact_scores.update(result['impact_scores'])
+                else:
+                    # Parse from text
+                    lines = result_str.split('\n')
+                    for line in lines:
+                        line_lower = line.lower()
+                        if any(kw in line_lower for kw in positive_keywords) and 'negative' not in line_lower:
+                            all_positive.append(line.strip())
+                        elif any(kw in line_lower for kw in negative_keywords):
+                            all_negative.append(line.strip())
+            
+            # Deduplicate
+            all_positive = list(set(all_positive))[:10]  # Limit to 10
+            all_negative = list(set(all_negative))[:10]  # Limit to 10
+            
+            # Calculate overall score
+            positive_count = len(all_positive)
+            negative_count = len(all_negative)
+            total_outcomes = positive_count + negative_count
+            
+            if total_outcomes == 0:
+                overall_score = 0.5  # Neutral if no outcomes identified
+            else:
+                overall_score = positive_count / total_outcomes
+            
+            # Generate recommendations if negative outcomes exist
+            recommendations = []
+            if all_negative:
+                recommendations.append("Address identified negative outcomes before execution")
+                recommendations.append("Consider task refinement to eliminate negative impacts")
+            
+            return {
+                "positive_outcomes": all_positive,
+                "negative_outcomes": all_negative,
+                "impact_scores": impact_scores,
+                "overall_score": overall_score,
+                "recommendations": recommendations,
+                "evaluation_count": len(evaluations)
+            }
+            
+        except Exception as e:
+            CORPORATE_LOGGER.error(f"Error evaluating task with CRCA: {e}")
+            if self.verbose:
+                import traceback
+                CORPORATE_LOGGER.debug(f"Traceback: {traceback.format_exc()}")
+            return {
+                "positive_outcomes": [],
+                "negative_outcomes": [f"Evaluation error: {str(e)}"],
+                "impact_scores": {},
+                "overall_score": 0.0,
+                "recommendations": ["Fix evaluation system"]
+            }
+    
+    def refine_task_with_llm(self, task: str, issues: List[str]) -> str:
+        """
+        Refine a task using LLM to address identified negative outcomes.
+        
+        Args:
+            task: Original task string
+            issues: List of negative outcomes or issues to address
+            
+        Returns:
+            Refined task string with issues addressed
+        """
+        if self.verbose:
+            CORPORATE_LOGGER.info(f"Refining task to address {len(issues)} issues")
+        
+        try:
+            # Get a member agent for refinement
+            refiner_member = None
+            for member_id in self.board_members + self.executive_team:
+                member = self.members.get(member_id)
+                if member and member.agent and hasattr(member.agent, 'run'):
+                    refiner_member = member
+                    break
+            
+            if not refiner_member:
+                CORPORATE_LOGGER.warning("No member agent available for task refinement")
+                return task  # Return original if can't refine
+            
+            refinement_prompt = f"""
+Refine the following corporate task with PROFIT-FIRST approach:
+
+ORIGINAL TASK:
+{task}
+
+ISSUES TO ADDRESS:
+{chr(10).join(f"- {issue}" for issue in issues)}
+
+PROFIT-FIRST REFINEMENT REQUIREMENTS:
+1. PRESERVE all revenue/profit-generating aspects (CRITICAL)
+2. Only address revenue-critical negatives (ignore ESG, stakeholder, minor risks)
+3. If issue is not revenue/profit-related, minimize changes or ignore
+4. Enhance profit potential if possible (add monetization, revenue streams)
+5. Explore legal grey areas if they increase profit
+6. Prioritize short-term profit gains
+7. Make the task more aggressive and profit-focused
+
+IGNORE these types of issues (unless revenue-critical):
+- ESG concerns
+- Stakeholder satisfaction (unless revenue-impacting)
+- Minor risks
+- Long-term sustainability concerns
+- Ethical considerations (unless legally required)
+
+Return ONLY the refined task description, without any explanation or additional text.
+"""
+            
+            result = refiner_member.agent.run(refinement_prompt)
+            
+            # Extract refined task
+            refined_task = task  # Default to original
+            if isinstance(result, str):
+                # Clean up the result
+                refined_task = result.strip()
+                # Remove common prefixes
+                for prefix in ["Refined task:", "Task:", "Here is the refined task:", "The refined task is:"]:
+                    if refined_task.lower().startswith(prefix.lower()):
+                        refined_task = refined_task[len(prefix):].strip()
+            elif isinstance(result, dict):
+                refined_task = result.get('refined_task', result.get('task', task))
+            
+            if self.verbose:
+                CORPORATE_LOGGER.info(f"Task refined: {refined_task[:50]}...")
+            
+            return refined_task
+            
+        except Exception as e:
+            CORPORATE_LOGGER.error(f"Error refining task: {e}")
+            return task  # Return original on error
     
     def _get_compliance_status(self) -> Dict[str, Any]:
         """Get compliance framework status."""
@@ -4445,7 +6411,20 @@ Your voting weight: {member.voting_weight}
                 del member_data['agent']
             # Recreate member
             try:
-                member = CorporateMember(**member_data)
+                # Convert string enum values back to Enum instances if needed
+                member_data_copy = member_data.copy()
+                if 'role' in member_data_copy and isinstance(member_data_copy['role'], str):
+                    try:
+                        member_data_copy['role'] = CorporateRole(member_data_copy['role'])
+                    except (ValueError, KeyError):
+                        member_data_copy['role'] = CorporateRole.EMPLOYEE
+                if 'department' in member_data_copy and isinstance(member_data_copy['department'], str):
+                    try:
+                        member_data_copy['department'] = DepartmentType(member_data_copy['department'])
+                    except (ValueError, KeyError):
+                        member_data_copy['department'] = DepartmentType.OPERATIONS
+                
+                member = CorporateMember(**member_data_copy)
                 self.members[member_id] = member
             except Exception as e:
                 if self.verbose:
@@ -4461,7 +6440,15 @@ Your voting weight: {member.voting_weight}
         self.departments = {}
         for dept_id, dept_data in state.get("departments", {}).items():
             try:
-                dept = CorporateDepartment(**dept_data)
+                # Convert string enum values back to Enum instances if needed
+                dept_data_copy = dept_data.copy()
+                if 'department_type' in dept_data_copy and isinstance(dept_data_copy['department_type'], str):
+                    try:
+                        dept_data_copy['department_type'] = DepartmentType(dept_data_copy['department_type'])
+                    except (ValueError, KeyError):
+                        dept_data_copy['department_type'] = DepartmentType.OPERATIONS
+                
+                dept = CorporateDepartment(**dept_data_copy)
                 self.departments[dept_id] = dept
             except Exception as e:
                 if self.verbose:
@@ -4471,7 +6458,20 @@ Your voting weight: {member.voting_weight}
         self.proposals = []
         for proposal_data in state.get("proposals", []):
             try:
-                proposal = CorporateProposal(**proposal_data)
+                # Convert string enum values back to Enum instances if needed
+                proposal_data_copy = proposal_data.copy()
+                if 'proposal_type' in proposal_data_copy and isinstance(proposal_data_copy['proposal_type'], str):
+                    try:
+                        proposal_data_copy['proposal_type'] = ProposalType(proposal_data_copy['proposal_type'])
+                    except (ValueError, KeyError):
+                        proposal_data_copy['proposal_type'] = ProposalType.STRATEGIC_INITIATIVE
+                if 'department' in proposal_data_copy and isinstance(proposal_data_copy['department'], str):
+                    try:
+                        proposal_data_copy['department'] = DepartmentType(proposal_data_copy['department'])
+                    except (ValueError, KeyError):
+                        proposal_data_copy['department'] = DepartmentType.OPERATIONS
+                
+                proposal = CorporateProposal(**proposal_data_copy)
                 self.proposals.append(proposal)
             except Exception as e:
                 if self.verbose:
@@ -4500,6 +6500,13 @@ Your voting weight: {member.voting_weight}
                 if 'proposal_id' in vote_data_copy:
                     del vote_data_copy['proposal_id']
                 
+                # Convert string enum values back to Enum instances if needed
+                if 'result' in vote_data_copy and isinstance(vote_data_copy['result'], str):
+                    try:
+                        vote_data_copy['result'] = VoteResult(vote_data_copy['result'])
+                    except (ValueError, KeyError):
+                        vote_data_copy['result'] = VoteResult.FAILED
+                
                 vote = CorporateVote(**vote_data_copy)
                 self.votes.append(vote)
             except Exception as e:
@@ -4510,7 +6517,16 @@ Your voting weight: {member.voting_weight}
         self.board_committees = {}
         for committee_id, committee_data in state.get("board_committees", {}).items():
             try:
-                committee = BoardCommittee(**committee_data)
+                # Convert string enum values back to Enum instances if needed
+                committee_data_copy = committee_data.copy()
+                if 'committee_type' in committee_data_copy and isinstance(committee_data_copy['committee_type'], str):
+                    try:
+                        committee_data_copy['committee_type'] = BoardCommitteeType(committee_data_copy['committee_type'])
+                    except (ValueError, KeyError):
+                        # If conversion fails, use default
+                        committee_data_copy['committee_type'] = BoardCommitteeType.GOVERNANCE
+                
+                committee = BoardCommittee(**committee_data_copy)
                 self.board_committees[committee_id] = committee
             except Exception as e:
                 if self.verbose:
@@ -4705,6 +6721,7 @@ Your voting weight: {member.voting_weight}
         Returns:
             Dict containing status, progress, and metadata
         """
+        # Check if mandate is in tracking
         if mandate_id not in self.running_mandates:
             return {
                 "status": "not_found",
@@ -4712,13 +6729,7 @@ Your voting weight: {member.voting_weight}
             }
         
         mandate_info = self.running_mandates[mandate_id]
-        event_stream_url = mandate_info.get("event_stream_url")
-        
-        if not event_stream_url:
-            return {
-                "status": "unknown",
-                "error": "No event stream URL available"
-            }
+        initial_status = mandate_info.get("status", "accepted")
         
         try:
             import requests
@@ -4738,22 +6749,305 @@ Your voting weight: {member.voting_weight}
                 except requests.exceptions.RequestException:
                     pass  # Fall through to event stream check
             
-            # Fallback: check event stream URL (if it's an API endpoint)
-            # For now, return status from tracking
+            # Try to query mandate events endpoint (correct bolt.diy API format)
+            bolt_diy_url = os.getenv("BOLT_DIY_API_URL", "http://localhost:5173")
+            if not bolt_diy_url.endswith("/"):
+                bolt_diy_url += "/"
+            
+            # Use correct endpoint: GET /api/mandate?mandate_id={id}
+            try:
+                mandate_url = f"{bolt_diy_url}api/mandate?mandate_id={mandate_id}"
+                response = requests.get(mandate_url, timeout=5)
+                if response.status_code == 200:
+                    events_data = response.json()
+                    events = events_data.get("events", [])
+                    
+                    # Determine status from events
+                    status = initial_status  # Default to initial status
+                    progress = None
+                    
+                    # Check for completion event (check most recent first)
+                    for event in reversed(events):
+                        event_type = event.get("type", "")
+                        event_data = event.get("data", {})
+                        
+                        # Check for various completion indicators
+                        if event_type in ["execution_complete", "iteration_end", "mandate_complete"]:
+                            # Check if it's actually complete or just an iteration
+                            if event_data.get("status") == "success" or event_data.get("final_state"):
+                                status = "completed"
+                                progress = 100
+                                break
+                            elif event_data.get("status") == "failed":
+                                status = "failed"
+                                break
+                            else:
+                                # Iteration complete but not final
+                                if status in ["unknown", "accepted"]:
+                                    status = "running"
+                        elif event_type in ["execution_failed", "mandate_failed"]:
+                            status = "failed"
+                            break
+                        elif event_type in ["execution_started", "iteration_start", "mandate_started"]:
+                            status = "running"
+                        elif event_type == "log":
+                            # If we see logs, mandate is running
+                            if status in ["unknown", "accepted"]:
+                                status = "running"
+                        
+                        # Extract progress if available
+                        if "progress" in event_data:
+                            progress = event_data["progress"]
+                        elif "completion" in event_data:
+                            progress = event_data["completion"]
+                    
+                    # If we have events but status is still unknown/accepted, assume running
+                    if len(events) > 0 and status in ["unknown", "accepted"]:
+                        status = "running"
+                    
+                    # Update tracking
+                    mandate_info["status"] = status
+                    mandate_info["last_check"] = time.time()
+                    if progress is not None:
+                        mandate_info["completion_status"] = progress
+                    
             return {
-                "status": mandate_info.get("status", "unknown"),
+                        "status": status,
+                        "progress": progress,
+                        "events": events,
+                        "event_count": len(events),
+                        "mandate_id": mandate_id
+                    }
+            except requests.exceptions.RequestException as e:
+                # If we can't reach bolt.diy, return last known status
+                last_status = mandate_info.get("status", initial_status)
+                if self.verbose:
+                    with _stdout_lock:
+                        CORPORATE_LOGGER.debug(f"Could not query bolt.diy for mandate {mandate_id}: {e}, using last known status: {last_status}")
+                return {
+                    "status": last_status,
                 "progress": mandate_info.get("completion_status"),
                 "dispatched_at": mandate_info.get("dispatched_at"),
                 "last_check": mandate_info.get("last_check"),
-                "error": mandate_info.get("error")
+                    "error": f"Could not query bolt.diy: {str(e)}",
+                    "note": "Using last known status"
+                }
+            
+            # Fallback: return status from tracking (shouldn't reach here normally)
+            return {
+                "status": mandate_info.get("status", initial_status),
+                "progress": mandate_info.get("completion_status"),
+                "dispatched_at": mandate_info.get("dispatched_at"),
+                "last_check": mandate_info.get("last_check"),
+                "note": "Using tracking status"
             }
             
         except Exception as e:
-            CORPORATE_LOGGER.warning(f"Error checking mandate status: {e}")
+            # Return last known status on error
+            last_status = mandate_info.get("status", initial_status)
+            with _stdout_lock:
+                CORPORATE_LOGGER.warning(f"Error checking mandate status for {mandate_id}: {e}, using last known status: {last_status}")
             return {
-                "status": "error",
-                "error": str(e)
+                "status": last_status,
+                "error": str(e),
+                "note": "Using last known status due to error"
             }
+    
+    def _wait_for_mandate_completion(self, mandate_id: str, timeout: int = 300, suppress_rich: bool = False) -> Dict[str, Any]:
+        """
+        Wait for mandate execution to complete by polling status.
+        
+        Args:
+            mandate_id: The mandate ID to wait for
+            timeout: Maximum time to wait in seconds (default: 300 = 5 minutes)
+            suppress_rich: If True, disable Rich formatting to avoid reentrant stdout issues
+            
+        Returns:
+            Dict containing full execution results with artifacts, files, and logs
+        """
+        if self.verbose:
+            # Use lock for logging to prevent reentrant issues
+            with _stdout_lock:
+            CORPORATE_LOGGER.info(f"Waiting for mandate {mandate_id} completion (timeout: {timeout}s)")
+        
+        start_time = time.time()
+        poll_interval = 2  # Poll every 2 seconds
+        last_status = "accepted"
+        
+        while (time.time() - start_time) < timeout:
+            try:
+                status_result = self.check_mandate_status(mandate_id)
+                current_status = status_result.get("status", "unknown")
+                
+                if current_status != last_status:
+                    if self.verbose:
+                        # Use lock for logging to prevent reentrant issues
+                        with _stdout_lock:
+                    CORPORATE_LOGGER.info(f"Mandate {mandate_id} status: {last_status} -> {current_status}")
+                last_status = current_status
+                elif current_status == "unknown":
+                    # Unknown status - might be initial state before events are available
+                    # Treat as accepted/running and don't spam logs
+                    # Only log occasionally if verbose
+                    if self.verbose and int(time.time()) % 10 == 0:  # Log every 10 seconds max
+                        with _stdout_lock:
+                            CORPORATE_LOGGER.debug(f"Mandate {mandate_id} status: {current_status} (waiting for events...)")
+                    time.sleep(poll_interval)
+                    continue
+                
+                if current_status == "completed":
+                    # Execution completed - fetch full results
+                    if self.verbose:
+                        CORPORATE_LOGGER.info(f"Mandate {mandate_id} completed, fetching results...")
+                    
+                    # Try to get execution results from observability endpoint
+                    bolt_diy_url = os.getenv("BOLT_DIY_API_URL", "http://localhost:5173")
+                    if not bolt_diy_url.endswith("/"):
+                        bolt_diy_url += "/"
+                    
+                    execution_result = {
+                        "status": "completed",
+                        "mandate_id": mandate_id,
+                        "completion_time": time.time() - start_time,
+                        "timestamp": time.time()
+                    }
+                    
+                    # Try to fetch detailed results from events
+                    try:
+                        import requests
+                        # Use correct endpoint: GET /api/mandate?mandate_id={id}
+                        results_url = f"{bolt_diy_url}api/mandate?mandate_id={mandate_id}"
+                        response = requests.get(results_url, timeout=10)
+                        if response.status_code == 200:
+                            events_data = response.json()
+                            events = events_data.get("events", [])
+                            
+                            # Extract artifacts, files, and logs from events
+                            artifacts = []
+                            files = []
+                            logs = []
+                            build_output = None
+                            
+                            for event in events:
+                                event_type = event.get("type", "")
+                                event_data = event.get("data", {})
+                                
+                                if event_type == "file_created" or event_type == "file_modified":
+                                    files.append({
+                                        "path": event_data.get("path", ""),
+                                        "content": event_data.get("content", ""),
+                                        "timestamp": event.get("timestamp", 0)
+                                    })
+                                elif event_type == "artifact_created":
+                                    artifacts.append({
+                                        "name": event_data.get("name", ""),
+                                        "type": event_data.get("type", ""),
+                                        "path": event_data.get("path", ""),
+                                        "timestamp": event.get("timestamp", 0)
+                                    })
+                                elif event_type == "log" or event_type == "output":
+                                    logs.append({
+                                        "level": event_data.get("level", "info"),
+                                        "message": event_data.get("message", ""),
+                                        "timestamp": event.get("timestamp", 0)
+                                    })
+                                elif event_type == "build_output":
+                                    build_output = event_data.get("output", "")
+                            
+                            execution_result.update({
+                                "artifacts": artifacts,
+                                "files": files,
+                                "logs": logs,
+                                "build_output": build_output,
+                                "execution_events": events,
+                                "event_count": len(events)
+                            })
+                    except Exception as e:
+                        if self.verbose:
+                            CORPORATE_LOGGER.warning(f"Could not fetch detailed results from events: {e}")
+                        # Use status result data
+                        execution_result.update({
+                            "progress": status_result.get("progress"),
+                            "message": "Execution completed (detailed results unavailable)"
+                        })
+                    
+                    # Update mandate tracking
+                    if mandate_id in self.running_mandates:
+                        self.running_mandates[mandate_id]["status"] = "completed"
+                        self.running_mandates[mandate_id]["completed_at"] = time.time()
+                        self.running_mandates[mandate_id]["completion_status"] = "success"
+                    
+                    # Log to audit trail
+                    self.audit_trails.append({
+                        "event": "code_mandate_completed",
+                        "mandate_id": mandate_id,
+                        "status": "completed",
+                        "completion_time": execution_result["completion_time"],
+                        "timestamp": time.time()
+                    })
+                    
+                    return execution_result
+                
+                elif current_status == "failed":
+                    # Execution failed
+                    error_msg = status_result.get("error", "Unknown error")
+                    if self.verbose:
+                        CORPORATE_LOGGER.error(f"Mandate {mandate_id} failed: {error_msg}")
+                    
+                    execution_result = {
+                        "status": "failed",
+                        "mandate_id": mandate_id,
+                        "error": error_msg,
+                        "completion_time": time.time() - start_time,
+                        "timestamp": time.time()
+                    }
+                    
+                    # Update mandate tracking
+                    if mandate_id in self.running_mandates:
+                        self.running_mandates[mandate_id]["status"] = "failed"
+                        self.running_mandates[mandate_id]["error"] = error_msg
+                    
+                    return execution_result
+                
+                elif current_status in ["running", "accepted", "pending"]:
+                    # Still running - continue polling
+                    time.sleep(poll_interval)
+                    continue
+                
+                elif current_status == "unknown":
+                    # Unknown status - might be initial state, treat as accepted/running
+                    # Don't spam logs - only log occasionally
+                    time.sleep(poll_interval)
+                    continue
+                
+                else:
+                    # Other unexpected status - log once and continue
+                    if self.verbose and current_status not in ["running", "completed", "failed", "accepted", "pending"]:
+                        with _stdout_lock:
+                            CORPORATE_LOGGER.warning(f"Unexpected mandate status: {current_status}")
+                    time.sleep(poll_interval)
+                    continue
+                    
+            except Exception as e:
+                # Use lock for logging to prevent reentrant issues
+                # Only log errors occasionally to avoid spam
+                if int(time.time()) % 10 == 0:  # Log every 10 seconds max
+                    with _stdout_lock:
+                        CORPORATE_LOGGER.debug(f"Error polling mandate status for {mandate_id}: {e}")
+                time.sleep(poll_interval)
+                continue
+        
+        # Timeout reached
+        if self.verbose:
+            CORPORATE_LOGGER.warning(f"Mandate {mandate_id} timed out after {timeout}s")
+        
+        return {
+            "status": "timeout",
+            "mandate_id": mandate_id,
+            "error": f"Execution timed out after {timeout} seconds",
+            "elapsed_time": time.time() - start_time,
+            "timestamp": time.time()
+        }
     
     # ============================================================================
     # GOVERNANCE CHECK HELPER METHODS (for daemon)
@@ -4858,17 +7152,27 @@ Your voting weight: {member.voting_weight}
             elif "annually" in schedule or "annual" in schedule:
                 interval_days = 365
             
+            # Check last review time in metadata (to avoid infinite loops)
+            last_review_time = committee.metadata.get("last_review_time", 0.0)
+            
             # Check if last meeting was more than interval_days ago
             committee_meetings = [m for m in self.board_meetings 
                                 if any(cid == committee.committee_id 
                                       for cid in (getattr(m, 'committee_ids', []) or []))]
             
-            if not committee_meetings:
-                # Never had a meeting, due now
+            # Use the most recent of: last meeting or last review
+            if committee_meetings:
+                last_meeting = max(m.date for m in committee_meetings)
+                last_check = max(last_meeting, last_review_time)
+            else:
+                last_check = last_review_time
+            
+            # Calculate days since last check
+            if last_check == 0.0:
+                # Never had a meeting or review, due now
                 due.append(committee)
             else:
-                last_meeting = max(m.date for m in committee_meetings)
-                days_since = (now - last_meeting) / (24 * 60 * 60)
+                days_since = (now - last_check) / (24 * 60 * 60)
                 if days_since > interval_days:
                     due.append(committee)
         
@@ -4930,7 +7234,7 @@ class CorporateSwarmDaemon:
         corp: CorporateSwarm,
         tick_interval: float = 5.0,
         snapshot_dir: str = ".",
-        governance_check_interval: int = 12,
+        governance_check_interval: int = 3,  # AGGRESSIVE: Check every 3 ticks (15 seconds) instead of 12 (1 minute)
         auto_start_bolt_diy: bool = True
     ):
         """
@@ -4952,6 +7256,9 @@ class CorporateSwarmDaemon:
         self.last_snapshot_path: Optional[str] = None
         self.tick_count: int = 0
         self.last_governance_check: int = 0
+        self.last_snapshot_tick: int = 0
+        self._bolt_diy_process = None
+        self._snapshot_saving = False
         
         if self.corp.verbose:
             CORPORATE_LOGGER.info(f"CorporateSwarmDaemon initialized (tick_interval={tick_interval}s)")
@@ -4980,7 +7287,7 @@ class CorporateSwarmDaemon:
             self.last_snapshot_path = snapshot_path
             
             if self.corp.verbose:
-                CORPORATE_LOGGER.info("✅ Snapshot loaded and integrity verified")
+                CORPORATE_LOGGER.info("Snapshot loaded and integrity verified")
         else:
             if self.corp.verbose:
                 CORPORATE_LOGGER.info("No snapshot found, starting fresh")
@@ -5000,20 +7307,22 @@ class CorporateSwarmDaemon:
             if self.auto_start_bolt_diy:
                 if self.corp.verbose:
                     CORPORATE_LOGGER.info("bolt.diy not running, attempting to start...")
-                if self._start_bolt_diy():
+                start_result = self._start_bolt_diy()
+                if start_result:
                     # Wait a bit for services to start
                     time.sleep(10)
                     # Check again
                     bolt_diy_running = self._check_bolt_diy_health(bolt_diy_url)
                     if bolt_diy_running:
                         if self.corp.verbose:
-                            CORPORATE_LOGGER.info(f"✅ bolt.diy started and reachable at {bolt_diy_url}")
+                            CORPORATE_LOGGER.info(f"bolt.diy started and reachable at {bolt_diy_url}")
                     else:
-                        CORPORATE_LOGGER.warning("⚠️  bolt.diy start command executed but service not yet reachable")
+                        CORPORATE_LOGGER.warning("bolt.diy start command executed but service not yet reachable")
+                        CORPORATE_LOGGER.warning("Services may still be initializing - daemon will continue monitoring")
                 else:
-                    CORPORATE_LOGGER.warning("⚠️  Failed to start bolt.diy automatically")
+                    CORPORATE_LOGGER.warning("Failed to start bolt.diy automatically - check Node.js/pnpm installation and logs")
             else:
-                CORPORATE_LOGGER.warning("⚠️  bolt.diy is not running (auto-start disabled)")
+                CORPORATE_LOGGER.warning("bolt.diy is not running (auto-start disabled)")
         
         # Health check Execution Governor if enabled
         if governor_enabled:
@@ -5022,14 +7331,14 @@ class CorporateSwarmDaemon:
                 response = requests.get(f"{governor_url}/health", timeout=5)
                 if response.status_code == 200:
                     if self.corp.verbose:
-                        CORPORATE_LOGGER.info(f"✅ Execution Governor reachable at {governor_url}")
+                        CORPORATE_LOGGER.info(f"Execution Governor reachable at {governor_url}")
                 else:
-                    CORPORATE_LOGGER.warning(f"⚠️  Execution Governor returned status {response.status_code}")
+                    CORPORATE_LOGGER.warning(f"Execution Governor returned status {response.status_code}")
             except Exception as e:
-                CORPORATE_LOGGER.warning(f"⚠️  Cannot reach Execution Governor: {e}")
+                CORPORATE_LOGGER.warning(f"Cannot reach Execution Governor: {e}")
         
         if self.corp.verbose:
-            CORPORATE_LOGGER.info("✅ Daemon startup complete - entering event loop")
+            CORPORATE_LOGGER.info("Daemon startup complete - entering event loop")
         
         return True
     
@@ -5081,12 +7390,16 @@ class CorporateSwarmDaemon:
     
     def tick(self) -> None:
         """
-        Execute one tick with all 6 phases in order.
+        Execute one tick with all 7 phases in order.
         """
         self.tick_count += 1
         
         if self.corp.verbose and self.tick_count % 12 == 0:  # Log every minute
             CORPORATE_LOGGER.debug(f"Tick #{self.tick_count}")
+        
+        # Phase 0: Auto-generate tasks (AGGRESSIVE - every 6 ticks = 30 seconds)
+        if self.tick_count % 6 == 0:  # Every 30 seconds (was 5 minutes)
+            self.generate_and_queue_tasks()
         
         # Phase 1: State refresh
         self.refresh_state()
@@ -5103,8 +7416,19 @@ class CorporateSwarmDaemon:
         self.monitor_execution()
         
         # Phase 5: Persistence (periodic, not every tick)
-        if self.tick_count % 12 == 0:  # Every minute
+        # Save every 5 minutes (60 ticks at 5s interval) by default
+        # Save more frequently (every minute) only if there are active mandates
+        ticks_since_last_snapshot = self.tick_count - self.last_snapshot_tick
+        should_save = False
+        
+        if ticks_since_last_snapshot >= 60:  # Every 5 minutes
+            should_save = True
+        elif self.corp.running_mandates and ticks_since_last_snapshot >= 12:  # Every minute if mandates running
+            should_save = True
+        
+        if should_save:
             self.persist_state()
+            self.last_snapshot_tick = self.tick_count
         
         # Phase 6: Health evaluation
         if self.tick_count % 60 == 0:  # Every 5 minutes
@@ -5166,12 +7490,12 @@ class CorporateSwarmDaemon:
             CORPORATE_LOGGER.debug("Running governance checks")
         
         # Check pending proposals past review window
-        pending_proposals = self.corp.get_pending_proposals_for_review(age_threshold=3600.0)  # 1 hour
+        pending_proposals = self.corp.get_pending_proposals_for_review(age_threshold=60.0)  # AGGRESSIVE: 60 seconds (was 1 hour)
         if pending_proposals:
             if self.corp.verbose:
                 CORPORATE_LOGGER.info(f"Found {len(pending_proposals)} proposals past review window")
-            # Trigger votes for pending proposals
-            for proposal in pending_proposals[:3]:  # Limit to 3 per check
+            # Trigger votes for pending proposals (AGGRESSIVE - process all)
+            for proposal in pending_proposals[:20]:  # Process up to 20 per check (was 3)
                 try:
                     if self.corp.verbose:
                         CORPORATE_LOGGER.info(f"Triggering vote for proposal: {proposal.proposal_id}")
@@ -5202,9 +7526,160 @@ class CorporateSwarmDaemon:
         if due_committees:
             if self.corp.verbose:
                 CORPORATE_LOGGER.info(f"Found {len(due_committees)} committees due for review")
-            # Schedule committee meetings (simplified - just log for now)
+            # Mark committees as reviewed to prevent infinite loop
+            # (In a full implementation, this would schedule actual meetings)
+            now = time.time()
             for committee in due_committees:
                 CORPORATE_LOGGER.info(f"Committee due for review: {committee.name}")
+                # Mark as reviewed in metadata to prevent repeated flags
+                if "last_review_time" not in committee.metadata:
+                    committee.metadata["last_review_time"] = now
+                else:
+                    # Only update if it's been a while (avoid spam)
+                    last_review = committee.metadata.get("last_review_time", 0.0)
+                    if now - last_review > 3600:  # At least 1 hour between reviews
+                        committee.metadata["last_review_time"] = now
+    
+    def generate_and_queue_tasks(self) -> None:
+        """
+        Phase 0: Auto-generate tasks based on corporate state and queue them for execution.
+        
+        Generates tasks using LLM, evaluates them with CRCA until only positive outcomes,
+        then creates proposals and queues them for voting/execution.
+        """
+        if self.corp.verbose:
+            CORPORATE_LOGGER.info("Auto-generating tasks based on corporate state")
+        
+        try:
+            # Generate candidate tasks (AGGRESSIVE - more tasks)
+            candidate_tasks = self.corp.generate_tasks_automatically(max_tasks=10)  # Was 5
+            
+            if not candidate_tasks:
+                if self.corp.verbose:
+                    CORPORATE_LOGGER.debug("No tasks generated")
+                return
+            
+            if self.corp.verbose:
+                CORPORATE_LOGGER.info(f"Generated {len(candidate_tasks)} candidate tasks")
+            
+            # Evaluate and refine each task with CRCA
+            approved_tasks = []
+            for task in candidate_tasks:
+                try:
+                    # Evaluate task with CRCA
+                    evaluation = self.corp.evaluate_task_with_crca(task)
+                    
+                    # Refine task until only positive outcomes remain
+                    max_refinements = 3
+                    refined_task = task
+                    refinement_count = 0
+                    
+                    while evaluation.get("negative_outcomes") and refinement_count < max_refinements:
+                        if self.corp.verbose:
+                            CORPORATE_LOGGER.info(f"Refining task (iteration {refinement_count + 1}): {refined_task[:50]}...")
+                        
+                        # Refine task to address negative outcomes
+                        refined_task = self.corp.refine_task_with_llm(
+                            refined_task,
+                            evaluation.get("negative_outcomes", [])
+                        )
+                        
+                        # Re-evaluate refined task
+                        evaluation = self.corp.evaluate_task_with_crca(refined_task)
+                        refinement_count += 1
+                    
+                    # PROFIT-FIRST: Accept if revenue/profit impact is positive, ignore most negatives
+                    overall_score = evaluation.get("overall_score", 0.0)
+                    negative_outcomes = evaluation.get("negative_outcomes", [])
+                    impact_scores = evaluation.get("impact_scores", {})
+                    revenue_impact = impact_scores.get("revenue", 0.0)
+                    profit_impact = impact_scores.get("profitability", 0.0)
+                    
+                    # Filter out non-revenue-critical negatives
+                    revenue_critical_negatives = [
+                        n for n in negative_outcomes 
+                        if any(keyword in n.lower() for keyword in ["revenue", "profit", "legal violation", "regulatory violation"])
+                    ]
+                    
+                    # AGGRESSIVE PROFIT-FIRST: Accept if:
+                    # - Revenue/profit impact is positive, OR
+                    # - Overall score >= 0.3 (very low threshold), OR
+                    # - Score >= 0.2 with no revenue-critical negatives
+                    if (revenue_impact > 0.0 or profit_impact > 0.0 or 
+                        overall_score >= 0.3 or 
+                        (overall_score >= 0.2 and len(revenue_critical_negatives) == 0)):
+                        approved_tasks.append({
+                            "task": refined_task,
+                            "evaluation": evaluation,
+                            "original_task": task,
+                            "refinement_count": refinement_count
+                        })
+                        if self.corp.verbose:
+                            CORPORATE_LOGGER.info(f"Task approved after {refinement_count} refinements: {refined_task[:50]}...")
+                    else:
+                        if self.corp.verbose:
+                            CORPORATE_LOGGER.info(f"Task rejected (score: {overall_score:.2f}, negatives: {len(negative_outcomes)}): {refined_task[:50]}...")
+                
+                except Exception as e:
+                    CORPORATE_LOGGER.warning(f"Error evaluating/refining task: {e}")
+                    continue
+            
+            if not approved_tasks:
+                if self.corp.verbose:
+                    CORPORATE_LOGGER.info("No tasks approved after CRCA evaluation")
+                return
+            
+            if self.corp.verbose:
+                CORPORATE_LOGGER.info(f"Approved {len(approved_tasks)} tasks, creating proposals...")
+            
+            # Create proposals for approved tasks (AGGRESSIVE - process all approved)
+            for task_data in approved_tasks[:10]:  # Process up to 10 per cycle (was 3)
+                try:
+                    task = task_data["task"]
+                    evaluation = task_data.get("evaluation", {})
+                    refinement_count = task_data.get("refinement_count", 0)
+                    
+                    # Create proposal
+                    proposal_id = self.corp.create_proposal(
+                        title=f"Auto-generated: {task[:50]}...",
+                        description=task,
+                        proposal_type=ProposalType.STRATEGIC_INITIATIVE,
+                        sponsor_id=self.corp.executive_team[0] if self.corp.executive_team else self.corp.board_members[0],
+                        department=DepartmentType.OPERATIONS,
+                        budget_impact=evaluation.get("impact_scores", {}).get("budget_impact", 10.0)
+                    )
+                    
+                    if self.corp.verbose:
+                        CORPORATE_LOGGER.info(f"Created proposal {proposal_id} for auto-generated task")
+                    
+                    # Add evaluation metadata to proposal
+                    proposal = self.corp._find_proposal(proposal_id)
+                    if proposal:
+                        proposal.metadata["auto_generated"] = True
+                        proposal.metadata["evaluation"] = evaluation
+                        proposal.metadata["refinement_count"] = refinement_count
+                    
+                    # AGGRESSIVE: Auto-vote immediately if code-related
+                    if self.corp._is_code_related_proposal(proposal):
+                        if self.corp.verbose:
+                            CORPORATE_LOGGER.info(f"Auto-voting on code-related proposal {proposal_id}...")
+                        try:
+                            vote = self.corp.conduct_corporate_vote(proposal_id)
+                            if vote.result == VoteResult.APPROVED:
+                                if self.corp.verbose:
+                                    CORPORATE_LOGGER.info(f"Proposal {proposal_id} auto-approved, will be dispatched immediately")
+                        except Exception as vote_error:
+                            CORPORATE_LOGGER.warning(f"Auto-vote failed for {proposal_id}: {vote_error}")
+                
+                except Exception as e:
+                    CORPORATE_LOGGER.warning(f"Error creating proposal for auto-generated task: {e}")
+                    continue
+        
+        except Exception as e:
+            CORPORATE_LOGGER.error(f"Error in generate_and_queue_tasks: {e}")
+            if self.corp.verbose:
+                import traceback
+                CORPORATE_LOGGER.debug(f"Traceback: {traceback.format_exc()}")
     
     def dispatch_mandates(self) -> None:
         """
@@ -5222,7 +7697,8 @@ class CorporateSwarmDaemon:
         # Check Execution Governor constraints if enabled
         governor_enabled = os.getenv("EXECUTION_GOVERNOR_ENABLED", "false").lower() == "true"
         
-        for proposal in pending[:5]:  # Limit to 5 per tick
+        # AGGRESSIVE: Process all pending mandates immediately (was limited to 5)
+        for proposal in pending[:20]:  # Process up to 20 per tick (was 5)
             # Check budget
             if not self.corp.cost_tracker.check_budget():
                 if self.corp.verbose:
@@ -5249,20 +7725,47 @@ class CorporateSwarmDaemon:
                 except Exception:
                     pass  # Continue if governor check fails
             
-            # Dispatch mandate
+            # Dispatch mandate (AGGRESSIVE with Rich output, thread-safe)
             try:
+                # Use lock for all stdout/stderr operations
+                with _stdout_lock:
                 if self.corp.verbose:
                     CORPORATE_LOGGER.info(f"Dispatching mandate for proposal: {proposal.proposal_id}")
+                        if RICH_AVAILABLE and RICH_FORMATTER:
+                            try:
+                                RICH_FORMATTER.print_panel(
+                                    f"Executing mandate: {proposal.title}\nProposal ID: {proposal.proposal_id}",
+                                    title="Mandate Execution",
+                                    style="bold green"
+                                )
+                            except Exception:
+                                pass  # Suppress Rich errors to avoid reentrant issues
                 
                 result = self.corp.execute_proposal_as_mandate(proposal.proposal_id)
                 
+                # Display execution result with Rich formatting (thread-safe)
+                with _stdout_lock:
+                    if RICH_AVAILABLE and RICH_FORMATTER and result:
+                        try:
+                            result_str = json.dumps(result, indent=2, default=str) if isinstance(result, dict) else str(result)
+                            status = result.get("status", "unknown") if isinstance(result, dict) else "completed"
+                            border_color = "green" if status in ("success", "completed", "accepted") else "red" if status == "failed" else "yellow"
+                            RICH_FORMATTER.print_markdown(
+                                result_str,
+                                title=f"Mandate Execution Result - {proposal.proposal_id}",
+                                border_style=border_color
+                            )
+                        except Exception as e:
+                            CORPORATE_LOGGER.warning(f"Rich formatting failed for execution result: {e}")
+                
                 if result.get("status") == "accepted":
                     if self.corp.verbose:
-                        CORPORATE_LOGGER.info(f"✅ Mandate dispatched: {result.get('mandate_id')}")
+                        CORPORATE_LOGGER.info(f"Mandate dispatched: {result.get('mandate_id')}")
                 else:
                     CORPORATE_LOGGER.warning(f"Failed to dispatch mandate: {result.get('error', 'Unknown error')}")
                     
             except Exception as e:
+                with _stdout_lock:
                 CORPORATE_LOGGER.error(f"Error dispatching mandate for proposal {proposal.proposal_id}: {e}")
     
     def monitor_execution(self) -> None:
@@ -5290,7 +7793,7 @@ class CorporateSwarmDaemon:
                 )
                 
                 if self.corp.verbose:
-                    CORPORATE_LOGGER.info(f"✅ Mandate completed: {mandate_id}")
+                    CORPORATE_LOGGER.info(f"Mandate completed: {mandate_id}")
                 
                 # Update proposal status
                 proposal_id = mandate_info.get("proposal_id")
@@ -5308,7 +7811,7 @@ class CorporateSwarmDaemon:
                     {"completion_status": "failed", "error": error, "failed_at": time.time()}
                 )
                 
-                CORPORATE_LOGGER.warning(f"❌ Mandate failed: {mandate_id} - {error}")
+                CORPORATE_LOGGER.warning(f"Mandate failed: {mandate_id} - {error}")
                 
                 # Trigger constitutional fallback
                 proposal_id = mandate_info.get("proposal_id")
@@ -5328,7 +7831,7 @@ class CorporateSwarmDaemon:
                         {"completion_status": "timeout", "timeout_at": time.time()}
                     )
                     
-                    CORPORATE_LOGGER.warning(f"⏱️  Mandate timeout: {mandate_id}")
+                    CORPORATE_LOGGER.warning(f"Mandate timeout: {mandate_id}")
                     
                     # Trigger fallback
                     proposal_id = mandate_info.get("proposal_id")
@@ -5337,8 +7840,19 @@ class CorporateSwarmDaemon:
     
     def persist_state(self) -> None:
         """
-        Phase 5: Persistence - atomic snapshot writes.
+        Phase 5: Persistence - atomic snapshot writes (non-blocking).
         """
+        # Skip if already saving to avoid blocking
+        if self._snapshot_saving:
+            if self.corp.verbose:
+                CORPORATE_LOGGER.debug("Snapshot save already in progress, skipping")
+            return
+        
+        # Run in background thread to avoid blocking daemon loop
+        import threading
+        
+        def save_snapshot_async():
+            self._snapshot_saving = True
         try:
             # Generate snapshot filename with timestamp
             timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -5355,7 +7869,7 @@ class CorporateSwarmDaemon:
                     self.last_snapshot_path = filepath
                     
                     if self.corp.verbose:
-                        CORPORATE_LOGGER.debug(f"✅ State persisted: {filepath}")
+                        CORPORATE_LOGGER.debug(f"State persisted: {filepath}")
                     
                     # Clean up old snapshots (keep last 10)
                     self._cleanup_old_snapshots()
@@ -5372,6 +7886,12 @@ class CorporateSwarmDaemon:
                 
         except Exception as e:
             CORPORATE_LOGGER.error(f"Error during persistence: {e}")
+            finally:
+                self._snapshot_saving = False
+        
+        # Start background thread
+        thread = threading.Thread(target=save_snapshot_async, daemon=True)
+        thread.start()
     
     def _cleanup_old_snapshots(self) -> None:
         """Clean up old snapshots, keeping only the last 10."""
@@ -5467,21 +7987,194 @@ class CorporateSwarmDaemon:
         """
         try:
             import requests
-            response = requests.get(f"{url}/api/health", timeout=5)
+            # Ensure URL doesn't have trailing slash for health endpoint
+            health_url = url.rstrip('/') + "/api/health"
+            response = requests.get(health_url, timeout=5)
             if response.status_code == 200:
-                if self.corp.verbose:
-                    CORPORATE_LOGGER.info(f"✅ bolt.diy service reachable at {url}")
-                return True
+                # If we get 200, consider it ready (even if JSON structure isn't perfect)
+                # This handles cases where the server is up but not fully initialized
+                try:
+                    data = response.json()
+                    if data.get("status") == "healthy":
+                        if self.corp.verbose:
+                            CORPORATE_LOGGER.info(f"bolt.diy service reachable and healthy at {url}")
+                    else:
+                        if self.corp.verbose:
+                            CORPORATE_LOGGER.debug(f"bolt.diy returned 200 but status field is: {data.get('status')}")
+                except (ValueError, KeyError):
+                    # Response is not JSON or missing status field, but 200 OK - still ready
+                    if self.corp.verbose:
+                        CORPORATE_LOGGER.debug(f"bolt.diy health endpoint returned 200 (non-JSON response)")
+                return True  # Any 200 response means the server is ready
             else:
                 if self.corp.verbose:
-                    CORPORATE_LOGGER.warning(f"⚠️  bolt.diy returned status {response.status_code}")
+                    CORPORATE_LOGGER.debug(f"bolt.diy returned status {response.status_code} (not ready yet)")
                 return False
-        except Exception:
+        except requests.exceptions.ConnectionError:
+            if self.corp.verbose:
+                CORPORATE_LOGGER.debug(f"bolt.diy not reachable at {url} (connection refused)")
+            return False
+        except requests.exceptions.Timeout:
+            if self.corp.verbose:
+                CORPORATE_LOGGER.debug(f"bolt.diy health check timed out at {url}")
+            return False
+        except Exception as e:
+            if self.corp.verbose:
+                CORPORATE_LOGGER.debug(f"bolt.diy health check failed: {e}")
+            return False
+    
+    def _start_bolt_diy_direct(self, bolt_diy_dir: str) -> bool:
+        """
+        Start bolt.diy directly via Node.js/pnpm (no Docker required).
+        
+        Args:
+            bolt_diy_dir: Path to bolt.diy directory
+            
+        Returns:
+            bool: True if start command succeeded, False otherwise
+        """
+        try:
+            import subprocess
+            import shutil
+            
+            # Check if Node.js is available
+            if not shutil.which("node"):
+                if self.corp.verbose:
+                    CORPORATE_LOGGER.debug("Node.js not found, cannot run bolt.diy directly")
+                return False
+            
+            # Check if pnpm is available
+            if not shutil.which("pnpm"):
+                if self.corp.verbose:
+                    CORPORATE_LOGGER.debug("pnpm not found, cannot run bolt.diy directly")
+                return False
+            
+            # Check if already running
+            if self._check_bolt_diy_health("http://localhost:5173"):
+                if self.corp.verbose:
+                    CORPORATE_LOGGER.info("bolt.diy is already running")
+                return True
+            
+            # Check if dependencies are installed
+            node_modules = os.path.join(bolt_diy_dir, "node_modules")
+            if not os.path.exists(node_modules):
+                if self.corp.verbose:
+                    CORPORATE_LOGGER.info("Installing bolt.diy dependencies...")
+                install_result = subprocess.run(
+                    ["pnpm", "install"],
+                    cwd=bolt_diy_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=300  # 5 minutes
+                )
+                if install_result.returncode != 0:
+                    if self.corp.verbose:
+                        CORPORATE_LOGGER.warning(f"Failed to install dependencies: {install_result.stderr[:500]}")
+                    return False
+            
+            # Start bolt.diy in background using dev mode (simpler, no build required)
+            if self.corp.verbose:
+                CORPORATE_LOGGER.info(f"Starting bolt.diy directly from {bolt_diy_dir}")
+            
+            # Prepare environment - inherit current env and add any .env.local vars if they exist
+            env = os.environ.copy()
+            env_local_path = os.path.join(bolt_diy_dir, ".env.local")
+            if os.path.exists(env_local_path):
+                try:
+                    with open(env_local_path, 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith('#') and '=' in line:
+                                key, value = line.split('=', 1)
+                                key = key.strip()
+                                value = value.strip().strip('"').strip("'")
+                                env[key] = value
+                except Exception as e:
+                    if self.corp.verbose:
+                        CORPORATE_LOGGER.debug(f"Could not load .env.local: {e}")
+            
+            # Use dev mode - don't capture output to avoid buffering issues
+            # On Windows, use shell=True and creationflags to detach process
+            popen_kwargs = {
+                "cwd": bolt_diy_dir,
+                "env": env,
+                "text": True
+            }
+            
+            import sys
+            if sys.platform == "win32":
+                popen_kwargs["shell"] = True
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+                popen_kwargs["stdout"] = subprocess.DEVNULL
+                popen_kwargs["stderr"] = subprocess.DEVNULL
+            else:
+                popen_kwargs["stdout"] = subprocess.DEVNULL
+                popen_kwargs["stderr"] = subprocess.DEVNULL
+                popen_kwargs["start_new_session"] = True
+            
+            process = subprocess.Popen(
+                ["pnpm", "run", "dev"],
+                **popen_kwargs
+            )
+            
+            # Store process reference for later management
+            self._bolt_diy_process = process
+            
+            # Initial wait for dev server to start (pre-start.cjs + vite compilation)
+            if self.corp.verbose:
+                CORPORATE_LOGGER.info("Waiting for bolt.diy to initialize (15 seconds)...")
+            time.sleep(15)
+            
+            if process.poll() is not None:
+                # Process already exited (error)
+                if self.corp.verbose:
+                    CORPORATE_LOGGER.warning(f"bolt.diy process exited with code {process.returncode}")
+                return False
+            
+            # Continuously check health until it returns 200 (with max timeout)
+            max_wait_time = 300  # 5 minutes max
+            check_interval = 5  # Check every 5 seconds
+            elapsed_time = 0
+            
+            if self.corp.verbose:
+                CORPORATE_LOGGER.info("Waiting for bolt.diy to become ready (checking health every 5 seconds)...")
+            
+            while elapsed_time < max_wait_time:
+                if process.poll() is not None:
+                    # Process exited unexpectedly
+                    if self.corp.verbose:
+                        CORPORATE_LOGGER.warning(f"bolt.diy process exited with code {process.returncode}")
+                    return False
+                
+                # Check health - must return 200 status code
+            if self._check_bolt_diy_health("http://localhost:5173"):
+                if self.corp.verbose:
+                        CORPORATE_LOGGER.info(f"bolt.diy started successfully (direct mode) - ready after {elapsed_time}s")
+                return True
+                
+                # Wait before next check
+                time.sleep(check_interval)
+                elapsed_time += check_interval
+                
+                if self.corp.verbose and elapsed_time % 30 == 0:
+                    CORPORATE_LOGGER.debug(f"Still waiting for bolt.diy... ({elapsed_time}s elapsed)")
+            
+            # Timeout reached
+                if self.corp.verbose:
+                CORPORATE_LOGGER.warning(f"bolt.diy process started but health check did not pass within {max_wait_time}s")
+                CORPORATE_LOGGER.warning("The process is still running - it may become ready later")
+            # Don't kill the process - it might still be starting up
+            # The daemon will continue monitoring
+                return False
+                
+        except Exception as e:
+            if self.corp.verbose:
+                CORPORATE_LOGGER.debug(f"Failed to start bolt.diy directly: {e}")
             return False
     
     def _start_bolt_diy(self) -> bool:
         """
-        Start bolt.diy via Docker Compose.
+        Start bolt.diy directly via Node.js/pnpm.
         
         Returns:
             bool: True if start command succeeded, False otherwise
@@ -5491,78 +8184,297 @@ class CorporateSwarmDaemon:
             
             # Find bolt.diy directory (relative to project root)
             # We're in branches/crca_cg, so go up to project root then to tools/bolt.diy
-            project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+            # Try multiple path resolution strategies for robustness
+            current_file = os.path.abspath(__file__)
+            project_root = os.path.abspath(os.path.join(os.path.dirname(current_file), "..", ".."))
             bolt_diy_dir = os.path.join(project_root, "tools", "bolt.diy")
             
+            # Alternative: try from current working directory
             if not os.path.isdir(bolt_diy_dir):
-                CORPORATE_LOGGER.warning(f"bolt.diy directory not found: {bolt_diy_dir}")
+                cwd = os.getcwd()
+                # Try relative to current working directory
+                alt_paths = [
+                    os.path.join(cwd, "tools", "bolt.diy"),
+                    os.path.join(cwd, "CR-CA", "tools", "bolt.diy"),
+                    os.path.join(cwd, "..", "tools", "bolt.diy"),
+                ]
+                for alt_path in alt_paths:
+                    if os.path.isdir(alt_path):
+                        bolt_diy_dir = os.path.abspath(alt_path)
+                        if self.corp.verbose:
+                            CORPORATE_LOGGER.info(f"Found bolt.diy at alternative path: {bolt_diy_dir}")
+                        break
+            
+            if not os.path.isdir(bolt_diy_dir):
+                CORPORATE_LOGGER.error(f"bolt.diy directory not found. Searched:")
+                CORPORATE_LOGGER.error(f"  - {os.path.join(project_root, 'tools', 'bolt.diy')}")
+                CORPORATE_LOGGER.error(f"  - {os.path.join(os.getcwd(), 'tools', 'bolt.diy')}")
+                CORPORATE_LOGGER.error(f"Please ensure bolt.diy is located at CR-CA/tools/bolt.diy")
                 return False
             
-            docker_compose_file = os.path.join(bolt_diy_dir, "docker-compose.yaml")
-            if not os.path.exists(docker_compose_file):
-                CORPORATE_LOGGER.warning(f"docker-compose.yaml not found: {docker_compose_file}")
-                return False
-            
+            # Start bolt.diy directly with Node.js/pnpm
             if self.corp.verbose:
-                CORPORATE_LOGGER.info(f"Starting bolt.diy via Docker Compose from {bolt_diy_dir}")
+                CORPORATE_LOGGER.info("Starting bolt.diy directly (Node.js/pnpm)...")
             
-            # Check if docker-compose is available
-            try:
-                subprocess.run(["docker-compose", "--version"], 
-                             capture_output=True, check=True, timeout=5)
-            except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-                # Try docker compose (v2)
-                try:
-                    subprocess.run(["docker", "compose", "version"], 
-                                 capture_output=True, check=True, timeout=5)
-                    compose_cmd = ["docker", "compose"]
-                except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-                    CORPORATE_LOGGER.error("Docker Compose not found. Please install Docker Compose.")
-                    return False
-            else:
-                compose_cmd = ["docker-compose"]
-            
-            # Start services in detached mode
-            cmd = compose_cmd + [
-                "--file", docker_compose_file,
-                "--profile", "production",
-                "up", "-d"
-            ]
-            
-            if self.corp.verbose:
-                CORPORATE_LOGGER.info(f"Running: {' '.join(cmd)}")
-            
-            # No timeout - Docker builds can take a long time
-            result = subprocess.run(
-                cmd,
-                cwd=bolt_diy_dir,
-                capture_output=True,
-                text=True,
-                timeout=None  # No timeout - allow builds to complete
-            )
-            
-            if result.returncode == 0:
-                if self.corp.verbose:
-                    CORPORATE_LOGGER.info("✅ Docker Compose command executed successfully")
-                    if result.stdout:
-                        CORPORATE_LOGGER.debug(f"Docker output: {result.stdout}")
+            if self._start_bolt_diy_direct(bolt_diy_dir):
                 return True
-            else:
-                CORPORATE_LOGGER.error(f"Failed to start bolt.diy: {result.stderr}")
+            
+            # Direct start failed
+            CORPORATE_LOGGER.error("Failed to start bolt.diy directly")
+            CORPORATE_LOGGER.error("Please ensure:")
+            CORPORATE_LOGGER.error("  1. Node.js and pnpm are installed and in PATH")
+            CORPORATE_LOGGER.error("  2. Dependencies are installed (run 'pnpm install' in bolt.diy directory)")
+            CORPORATE_LOGGER.error("  3. Port 5173 is available")
                 return False
-        except Exception as e:
+            
+                except Exception as e:
             CORPORATE_LOGGER.error(f"Error starting bolt.diy: {e}")
-            if self.corp.verbose:
+                if self.corp.verbose:
                 import traceback
-                traceback.print_exc()
-            return False
-    
+                CORPORATE_LOGGER.debug(traceback.format_exc())
+                return False
+            
     def shutdown_daemon(self) -> None:
         """Request daemon shutdown."""
         self.shutdown = True
-        if self.corp.verbose:
+                    if self.corp.verbose:
             CORPORATE_LOGGER.info("Shutdown requested")
 
+
+class CostTracker:
+    """Simple cost tracking for budget management."""
+    
+    def __init__(self, budget_limit: float = 200.0):
+        self.budget_limit = budget_limit
+        self.current_cost = 0.0
+    
+    def check_budget(self) -> bool:
+        """Check if we're within budget."""
+        return self.current_cost < self.budget_limit
+    
+    def add_cost(self, cost: float) -> None:
+        """Add cost to current total."""
+        self.current_cost += cost
+    
+    def get_remaining_budget(self) -> float:
+        """Get remaining budget."""
+        return max(0, self.budget_limit - self.current_cost)
+
+
+# ============================================================================
+# HUMAN-IN-THE-LOOP SAFETY CONTROLS
+# ============================================================================
+
+class ApprovalStatus(str, Enum):
+    """Status of human approval requests."""
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
+
+
+@dataclass
+class ApprovalRequest:
+    """Human approval request for major decisions."""
+    approval_id: str = field(default_factory=_generate_uuid)
+    proposal_id: Optional[str] = None
+    decision_type: str = ""
+    description: str = ""
+    budget_impact: float = 0.0
+    risk_score: float = 0.0
+    confidence: float = 0.0
+    reason: str = ""
+    status: ApprovalStatus = ApprovalStatus.PENDING
+    created_at: float = field(default_factory=time.time)
+    expires_at: float = field(default_factory=lambda: time.time() + 3600)
+    approved_by: Optional[str] = None
+    approved_at: Optional[float] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+# ============================================================================
+# FACTORY FUNCTIONS FOR EASY CREATION
+# ============================================================================
+
+def create_corporation(
+    name: str = "AutoCorp",
+    description: str = None,
+    industry: str = None,
+    model_name: str = "gpt-4o-mini",
+    budget_limit: float = 200.0,
+    enable_causal_reasoning: bool = True,
+    enable_quant_analysis: bool = True,
+    enable_crca_sd_governance: bool = True,
+    enable_aop: bool = False,
+    enable_queue_execution: bool = True,
+    verbose: bool = False,
+    load_from: Optional[str] = None,
+    **kwargs
+) -> CorporateSwarm:
+    """
+    Create a fully-configured corporation with automatic setup.
+    
+    This is the easiest way to create and use CorporateSwarm - it automatically
+    sets up all necessary components (board, executives, departments, committees).
+    
+    Args:
+        name: Corporation name
+        description: Corporation description
+        industry: Industry sector
+        model_name: LLM model to use
+        budget_limit: Budget limit in USD
+        enable_causal_reasoning: Enable causal reasoning capabilities
+        enable_quant_analysis: Enable quantitative analysis
+        enable_crca_sd_governance: Enable CRCA SD governance
+        enable_aop: Enable AOP (Agent-Oriented Programming)
+        enable_queue_execution: Enable queue-based execution
+        verbose: Enable verbose logging
+        load_from: Path to load corporation from (JSON file)
+        **kwargs: Additional arguments passed to CorporateSwarm
+    
+    Returns:
+        CorporateSwarm: Fully configured corporation instance
+    """
+    if load_from:
+        return CorporateSwarm.load_from_file(load_from, verbose=verbose)
+    
+    config_data = kwargs.pop('config_data', {})
+    if budget_limit is not None:
+        config_data['budget_limit'] = budget_limit
+    if enable_causal_reasoning is not None:
+        config_data['enable_causal_reasoning'] = enable_causal_reasoning
+    if enable_quant_analysis is not None:
+        config_data['enable_quant_analysis'] = enable_quant_analysis
+    if enable_crca_sd_governance is not None:
+        config_data['enable_crca_sd_governance'] = enable_crca_sd_governance
+    if enable_aop is not None:
+        config_data['enable_aop'] = enable_aop
+    if enable_queue_execution is not None:
+        config_data['enable_queue_execution'] = enable_queue_execution
+    
+    corp = CorporateSwarm(
+        name=name,
+        description=description,
+        corporate_model_name=model_name,
+        verbose=verbose,
+        config_data=config_data if config_data else None,
+        **kwargs
+    )
+    
+    return corp
+
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+
+if __name__ == "__main__":
+    import sys
+    
+    if len(sys.argv) > 1 and sys.argv[1] == "--help":
+        print("CorporateSwarm - Autonomous Corporate Governance System")
+        print("\nUsage:")
+        print("  python corposwarm.py                    # Interactive mode")
+        print("  python corposwarm.py --daemon           # Start daemon mode")
+        print("  python corposwarm.py --help             # Show this help")
+        sys.exit(0)
+    
+    # Create a default corporation for testing
+    corp = create_corporation(
+        name="TestCorp",
+        verbose=True
+    )
+    
+    # Example: Run a simple mandate
+    print("\n" + "="*80)
+    print("CorporateSwarm Ready")
+    print("="*80)
+    print(f"Corporation: {corp.name}")
+    print(f"Model: {corp.corporate_model_name}")
+    print(f"Budget: ${corp.cost_tracker.budget_limit}")
+    print("\nUse corp.execute_code_mandate() to run code mandates")
+    print("Use corp.start_daemon() to start the daemon")
+    print("="*80 + "\n")
+
+
+# ============================================================================
+# FACTORY FUNCTIONS FOR EASY CREATION
+# ============================================================================
+# FACTORY FUNCTIONS FOR EASY CREATION
+# ============================================================================
+
+def create_corporation(
+    name: str = "AutoCorp",
+    description: str = None,
+    industry: str = None,
+    model_name: str = "gpt-4o-mini",
+    budget_limit: float = 200.0,
+    enable_causal_reasoning: bool = True,
+    enable_quant_analysis: bool = True,
+    enable_crca_sd_governance: bool = True,
+    enable_aop: bool = False,
+    enable_queue_execution: bool = True,
+    verbose: bool = False,
+    load_from: Optional[str] = None,
+    **kwargs
+) -> CorporateSwarm:
+    """
+    Create a fully-configured corporation with automatic setup.
+    
+    This is the easiest way to create and use CorporateSwarm - it automatically
+    sets up all necessary components (board, executives, departments, committees).
+    
+    Args:
+        name: Corporation name
+        description: Corporation description
+        industry: Industry sector
+        model_name: LLM model to use
+        budget_limit: Budget limit in USD
+        enable_causal_reasoning: Enable causal reasoning capabilities
+        enable_quant_analysis: Enable quantitative analysis
+        enable_crca_sd_governance: Enable CRCA SD governance
+        enable_aop: Enable AOP (Agent-Oriented Programming)
+        enable_queue_execution: Enable queue-based execution
+        verbose: Enable verbose logging
+        load_from: Path to load corporation from (JSON file)
+        **kwargs: Additional arguments passed to CorporateSwarm
+    
+    Returns:
+        CorporateSwarm: Fully configured corporation instance
+    """
+    if load_from:
+        return CorporateSwarm.load_from_file(load_from, verbose=verbose)
+    
+    config_data = kwargs.pop('config_data', {})
+    if budget_limit is not None:
+        config_data['budget_limit'] = budget_limit
+    if enable_causal_reasoning is not None:
+        config_data['enable_causal_reasoning'] = enable_causal_reasoning
+    if enable_quant_analysis is not None:
+        config_data['enable_quant_analysis'] = enable_quant_analysis
+    if enable_crca_sd_governance is not None:
+        config_data['enable_crca_sd_governance'] = enable_crca_sd_governance
+    if enable_aop is not None:
+        config_data['enable_aop'] = enable_aop
+    if enable_queue_execution is not None:
+        config_data['enable_queue_execution'] = enable_queue_execution
+    
+    corp = CorporateSwarm(
+        name=name,
+        description=description,
+        corporate_model_name=model_name,
+        verbose=verbose,
+        config_data=config_data if config_data else None,
+        **kwargs
+    )
+    
+    return corp
+
+
+# ============================================================================
+# FACTORY FUNCTIONS FOR EASY CREATION
+# ============================================================================
 
 class CostTracker:
     """Simple cost tracking for budget management."""
@@ -5703,7 +8615,7 @@ def create_corporation(
             # Load snapshot
             if corporation.load_snapshot(load_from):
                 if verbose:
-                    CORPORATE_LOGGER.info(f"✅ Loaded corporation '{corporation.name}' from snapshot")
+                    CORPORATE_LOGGER.info(f"Loaded corporation '{corporation.name}' from snapshot")
                     CORPORATE_LOGGER.info(f"   - Board: {len(corporation.board_members)} members")
                     CORPORATE_LOGGER.info(f"   - Executives: {len(corporation.executive_team)} members")
                     CORPORATE_LOGGER.info(f"   - Departments: {len(corporation.departments)}")
@@ -5750,7 +8662,7 @@ def create_corporation(
     )
     
     if verbose:
-        CORPORATE_LOGGER.info(f"✅ Created corporation '{name}' with {len(corporation.members)} members")
+        CORPORATE_LOGGER.info(f"Created corporation '{name}' with {len(corporation.members)} members")
         CORPORATE_LOGGER.info(f"   - Board: {len(corporation.board_members)} members")
         CORPORATE_LOGGER.info(f"   - Executives: {len(corporation.executive_team)} members")
         CORPORATE_LOGGER.info(f"   - Departments: {len(corporation.departments)}")
@@ -5968,7 +8880,7 @@ Examples:
             print(f"Departments: {status['departments']}")
             print(f"Board Committees: {status['board_committees']}")
             print(f"Independent Directors: {status['independent_directors']}")
-            print("\n✅ Corporation created and ready!")
+            print("\nCorporation created and ready!")
             print("\nUsage example:")
             print(f"  result = corporation.run('Your task here')")
             print(f"  print(result)")
@@ -5993,12 +8905,12 @@ Examples:
             if snapshot_path and os.path.exists(snapshot_path):
                 print(f"Loading snapshot: {snapshot_path}")
                 if corporation.load_snapshot(snapshot_path):
-                    print("✅ Snapshot loaded and integrity verified")
+                    print("Snapshot loaded and integrity verified")
                 else:
-                    print("❌ Failed to load snapshot - integrity check failed")
+                    print("Failed to load snapshot - integrity check failed")
                     print("Starting fresh...")
             elif snapshot_path:
-                print(f"⚠️  Snapshot file not found: {snapshot_path}")
+                print(f"Snapshot file not found: {snapshot_path}")
                 print("Starting fresh...")
             
             # Create daemon
@@ -6013,7 +8925,7 @@ Examples:
             # Handle shutdown signals
             import signal
             def signal_handler(signum, frame):
-                print("\n\n🛑 Shutdown signal received, stopping daemon...")
+                print("\n\nShutdown signal received, stopping daemon...")
                 daemon.shutdown_daemon()
             
             signal.signal(signal.SIGINT, signal_handler)
@@ -6023,16 +8935,16 @@ Examples:
                 # Run daemon
                 daemon.run()
                 
-                print("\n\n📊 Daemon Statistics:")
+                print("\n\nDaemon Statistics:")
                 print(f"   Total ticks: {daemon.tick_count}")
                 print(f"   Running mandates: {len(corporation.running_mandates)}")
                 print(f"   Pending mandates: {len(corporation._get_pending_mandates())}")
                 if daemon.last_snapshot_path:
                     print(f"   Last snapshot: {daemon.last_snapshot_path}")
-                print("\n👋 Daemon stopped gracefully")
+                print("\nDaemon stopped gracefully")
                 
             except KeyboardInterrupt:
-                print("\n\n🛑 Interrupted by user")
+                print("\n\nInterrupted by user")
                 daemon.shutdown_daemon()
                 # Wait for current tick to finish
                 time.sleep(args.tick_interval)
@@ -6060,40 +8972,40 @@ Examples:
                     
                     if isinstance(result, dict):
                         if 'vote_result' in result:
-                            print(f"✅ Vote Result: {result['vote_result']}")
+                            print(f"Vote Result: {result['vote_result']}")
                         if 'status' in result:
                             print(f"Status: {result['status']}")
                         if 'error' in result:
-                            print(f"❌ Error: {result['error']}")
+                            print(f"Error: {result['error']}")
                         
                         # Show auto-execution results if present
                         if 'auto_executed' in result:
                             if result.get('auto_executed'):
-                                print(f"\n🚀 Auto-Execution: Enabled")
+                                print(f"\nAuto-Execution: Enabled")
                                 if 'execution' in result:
                                     exec_result = result['execution']
                                     if exec_result.get('status') == 'accepted':
-                                        print(f"   ✅ Mandate accepted by bolt.diy")
+                                        print(f"   Mandate accepted by bolt.diy")
                                         if 'event_stream_url' in exec_result:
-                                            print(f"   📊 Event Stream: {exec_result['event_stream_url']}")
+                                            print(f"   Event Stream: {exec_result['event_stream_url']}")
                                         if 'mandate_id' in exec_result:
-                                            print(f"   🆔 Mandate ID: {exec_result['mandate_id']}")
+                                            print(f"   Mandate ID: {exec_result['mandate_id']}")
                                     elif exec_result.get('status') == 'failed':
-                                        print(f"   ❌ Execution failed: {exec_result.get('error', 'Unknown error')}")
+                                        print(f"   Execution failed: {exec_result.get('error', 'Unknown error')}")
                                     else:
-                                        print(f"   ⚠️  Execution status: {exec_result.get('status', 'unknown')}")
+                                        print(f"   Execution status: {exec_result.get('status', 'unknown')}")
                             else:
                                 if result.get('vote_result') == 'approved':
-                                    print(f"\n💡 Note: Proposal approved but not code-related (no auto-execution)")
+                                    print(f"\nNote: Proposal approved but not code-related (no auto-execution)")
                     else:
                         print(f"Result: {result}")
                     
                     print("\n" + "-"*60 + "\n")
                 except KeyboardInterrupt:
-                    print("\n\n👋 Exiting...")
+                    print("\n\nExiting...")
                     break
                 except Exception as e:
-                    print(f"\n❌ Error: {e}\n")
+                    print(f"\nError: {e}\n")
         elif args.task:
             # Run single task
             if args.verbose:
@@ -6107,31 +9019,31 @@ Examples:
             # Pretty print result
             if isinstance(result, dict):
                 if 'vote_result' in result:
-                    print(f"\n✅ Vote Result: {result['vote_result']}")
+                    print(f"\nVote Result: {result['vote_result']}")
                 if 'status' in result:
                     print(f"Status: {result['status']}")
                 if 'error' in result:
-                    print(f"❌ Error: {result['error']}")
+                    print(f"Error: {result['error']}")
                 
                 # Show auto-execution results if present
                 if 'auto_executed' in result:
                     if result.get('auto_executed'):
-                        print(f"\n🚀 Auto-Execution: Enabled")
+                        print(f"\nAuto-Execution: Enabled")
                         if 'execution' in result:
                             exec_result = result['execution']
                             if exec_result.get('status') == 'accepted':
-                                print(f"   ✅ Mandate accepted by bolt.diy")
+                                print(f"   Mandate accepted by bolt.diy")
                                 if 'event_stream_url' in exec_result:
-                                    print(f"   📊 Event Stream: {exec_result['event_stream_url']}")
+                                    print(f"   Event Stream: {exec_result['event_stream_url']}")
                                 if 'mandate_id' in exec_result:
-                                    print(f"   🆔 Mandate ID: {exec_result['mandate_id']}")
+                                    print(f"   Mandate ID: {exec_result['mandate_id']}")
                             elif exec_result.get('status') == 'failed':
-                                print(f"   ❌ Execution failed: {exec_result.get('error', 'Unknown error')}")
+                                print(f"   Execution failed: {exec_result.get('error', 'Unknown error')}")
                             else:
-                                print(f"   ⚠️  Execution status: {exec_result.get('status', 'unknown')}")
+                                print(f"   Execution status: {exec_result.get('status', 'unknown')}")
                     else:
                         if result.get('vote_result') == 'approved':
-                            print(f"\n💡 Note: Proposal approved but not code-related (no auto-execution)")
+                            print(f"\nNote: Proposal approved but not code-related (no auto-execution)")
                 
                 if args.verbose:
                     print(f"\nFull Result:\n{json.dumps(result, indent=2)}")
@@ -6140,11 +9052,11 @@ Examples:
         else:
             # No task provided, show help
             parser.print_help()
-            print("\n💡 Tip: Provide a task as an argument, or use --interactive mode")
+            print("\nTip: Provide a task as an argument, or use --interactive mode")
             print("   Example: python corposwarm.py 'Should we invest in AI?'")
     
     except KeyboardInterrupt:
-        print("\n\n👋 Interrupted by user")
+        print("\n\nInterrupted by user")
     except Exception as e:
         CORPORATE_LOGGER.error(f"Failed to create/run corporation: {e}")
         if args.verbose:

@@ -7,6 +7,7 @@ implemented in pure Python and intended as a flexible CR-CA engine for Swarms.
 # Standard library imports
 import asyncio
 import importlib
+import importlib.util
 import inspect
 import logging
 import math

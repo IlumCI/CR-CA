@@ -14,7 +14,6 @@ import type { Mandate, ExecutionResult, ExecutionEvent, BuildOutput, FileDiff } 
 import { ExecutionEventEmitter, eventRegistry } from './execution-events';
 import { ActionRunner } from './action-runner';
 import { StreamingMessageParser, type ActionCallbackData } from './message-parser';
-import { streamText, type Messages } from '~/lib/.server/llm/stream-text';
 import { WORK_DIR } from '~/utils/constants';
 import { createScopedLogger } from '~/utils/logger';
 import type { IProviderSetting } from '~/types/model';
@@ -56,6 +55,8 @@ export class MandateExecutor {
     providerSettings: Record<string, IProviderSetting>,
     env?: Env
   ) {
+    const constructorStartTime = Date.now();
+    
     this.mandate = mandate;
     this.webcontainer = webcontainer;
     this.shellTerminal = shellTerminal;
@@ -63,9 +64,23 @@ export class MandateExecutor {
     this.providerSettings = providerSettings;
     this.env = env;
     
+    // Initialize event emitter
+    this.eventEmitter = eventRegistry.getEmitter(mandate.mandate_id);
+    this.eventEmitter.emitLog('debug', 'Initializing MandateExecutor...', 'mandate-executor');
+    
+    // Validate mandate
+    this.eventEmitter.emitLog('debug', 'Validating mandate structure...', 'mandate-executor');
+    if (!mandate.mandate_id || !mandate.objectives || !mandate.constraints || !mandate.budget) {
+      this.eventEmitter.emitError('Invalid mandate structure: missing required fields', 'mandate-executor');
+      throw new Error('Invalid mandate structure');
+    }
+    this.eventEmitter.emitLog('info', `Mandate validated: ${mandate.objectives.length} objective(s)`, 'mandate-executor');
+    
     // Initialize CorporateSwarm client for governance integration
     const corporateSwarmUrl = process.env.CORPORATE_SWARM_API_URL || 'http://localhost:8000';
+    this.eventEmitter.emitLog('debug', `Initializing CorporateSwarm client at ${corporateSwarmUrl}`, 'mandate-executor');
     this.corporateSwarmClient = new CorporateSwarmClient({ baseUrl: corporateSwarmUrl });
+    this.eventEmitter.emitLog('info', 'CorporateSwarm client initialized', 'mandate-executor');
 
     this.budgetConsumed = {
       tokens: 0,
@@ -73,11 +88,10 @@ export class MandateExecutor {
       cost: 0,
     };
     this.startTime = Date.now();
-
-    // Initialize event emitter
-    this.eventEmitter = eventRegistry.getEmitter(mandate.mandate_id);
+    this.eventEmitter.emitLog('debug', 'Budget tracking initialized', 'mandate-executor');
 
     // Initialize action runner
+    this.eventEmitter.emitLog('debug', 'Initializing ActionRunner...', 'mandate-executor');
     this.actionRunner = new ActionRunner(
       webcontainer,
       shellTerminal,
@@ -89,13 +103,21 @@ export class MandateExecutor {
         this.eventEmitter.emitLog('info', `Deployment: ${alert.title}`, 'deployment');
       }
     );
+    this.eventEmitter.emitLog('info', 'ActionRunner initialized', 'mandate-executor');
+    
+    const constructorTime = Date.now() - constructorStartTime;
+    this.eventEmitter.emitLog('info', `MandateExecutor constructor completed in ${constructorTime}ms`, 'mandate-executor');
   }
 
   /**
    * Execute the mandate through autonomous iteration cycles.
    */
   async execute(): Promise<ExecutionResult> {
+    const executionStartTime = Date.now();
     logger.info(`Starting execution of mandate ${this.mandate.mandate_id}`);
+    this.eventEmitter.emitLog('info', `Starting execution of mandate ${this.mandate.mandate_id}`, 'mandate-executor');
+    this.eventEmitter.emitLog('info', `Budget limits: ${this.mandate.budget.token} tokens, ${this.mandate.budget.time}s time, $${this.mandate.budget.cost} cost`, 'mandate-executor');
+    this.eventEmitter.emitLog('info', `Max iterations: ${this.mandate.iteration_config.max_iterations}, Quality threshold: ${this.mandate.iteration_config.quality_threshold}`, 'mandate-executor');
 
     const errors: ExecutionResult['errors'] = [];
     let finalStatus: ExecutionResult['status'] = 'success';
@@ -105,6 +127,7 @@ export class MandateExecutor {
 
     try {
       // Execute iterations
+      this.eventEmitter.emitLog('info', `Starting iteration loop (max ${this.mandate.iteration_config.max_iterations} iterations)`, 'mandate-executor');
       for (
         let iteration = 0;
         iteration < this.mandate.iteration_config.max_iterations;
@@ -112,6 +135,7 @@ export class MandateExecutor {
       ) {
         this.eventEmitter.setIteration(iteration);
         this.eventEmitter.emitIterationStart(iteration);
+        this.eventEmitter.emitLog('info', `=== Iteration ${iteration + 1}/${this.mandate.iteration_config.max_iterations} ===`, 'mandate-executor');
 
         const iterationStartTime = Date.now();
 
@@ -125,30 +149,50 @@ export class MandateExecutor {
           }
 
           // 1. Plan phase - Generate plan using LLM
+          this.eventEmitter.emitLog('info', `[Iteration ${iteration}] Phase 1: Generating plan...`, 'mandate-executor');
+          const planStartTime = Date.now();
           const plan = await this.generatePlan(iteration);
           if (!plan) {
             throw new Error('Failed to generate plan');
           }
+          const planTime = Date.now() - planStartTime;
+          this.eventEmitter.emitLog('info', `[Iteration ${iteration}] Plan generated in ${planTime}ms`, 'mandate-executor');
 
           // 2. Apply phase - Execute actions from plan
+          this.eventEmitter.emitLog('info', `[Iteration ${iteration}] Phase 2: Executing plan...`, 'mandate-executor');
+          const applyStartTime = Date.now();
           const actionsExecuted = await this.executePlan(plan, iteration);
+          const applyTime = Date.now() - applyStartTime;
+          this.eventEmitter.emitLog('info', `[Iteration ${iteration}] Plan executed in ${applyTime}ms (${actionsExecuted.length} actions)`, 'mandate-executor');
 
           // 3. Test phase (if required)
           if (this.mandate.iteration_config.test_required) {
+            this.eventEmitter.emitLog('info', `[Iteration ${iteration}] Phase 3: Running tests...`, 'mandate-executor');
+            const testStartTime = Date.now();
             testsPassed = await this.runTests();
+            const testTime = Date.now() - testStartTime;
             this.eventEmitter.emitLog(
               testsPassed ? 'info' : 'warn',
-              `Tests ${testsPassed ? 'passed' : 'failed'}`,
+              `[Iteration ${iteration}] Tests ${testsPassed ? 'passed' : 'failed'} in ${testTime}ms`,
               'testing'
             );
+          } else {
+            this.eventEmitter.emitLog('debug', `[Iteration ${iteration}] Phase 3: Tests skipped (not required)`, 'mandate-executor');
           }
 
           // 4. Evaluate phase - Quality check
+          this.eventEmitter.emitLog('info', `[Iteration ${iteration}] Phase 4: Evaluating quality...`, 'mandate-executor');
+          const evalStartTime = Date.now();
           qualityScore = await this.evaluateQuality(iteration);
-          this.eventEmitter.emitLog('info', `Quality score: ${qualityScore}`, 'evaluation');
+          const evalTime = Date.now() - evalStartTime;
+          this.eventEmitter.emitLog('info', `[Iteration ${iteration}] Quality score: ${qualityScore} (evaluated in ${evalTime}ms)`, 'evaluation');
 
           // 5. Governance check
+          this.eventEmitter.emitLog('info', `[Iteration ${iteration}] Phase 5: Performing governance check...`, 'mandate-executor');
+          const govStartTime = Date.now();
           await this.performGovernanceCheck(iteration);
+          const govTime = Date.now() - govStartTime;
+          this.eventEmitter.emitLog('info', `[Iteration ${iteration}] Governance check completed in ${govTime}ms`, 'mandate-executor');
 
           // 6. Check if we should continue
           if (qualityScore >= this.mandate.iteration_config.quality_threshold) {
@@ -361,6 +405,12 @@ Current working directory: ${WORK_DIR}
 
       const systemPrompt = getSystemPrompt(WORK_DIR, undefined, undefined);
 
+      // Dynamically import streamText using eval to avoid static analysis
+      // This prevents Remix from detecting the server-only import during build
+      // Note: This will only work on the server; client-side code should use API routes
+      const streamTextModule = await eval('import("~/lib/.server/llm/stream-text")');
+      const { streamText } = streamTextModule;
+      
       const result = await streamText({
         messages,
         env: this.env,

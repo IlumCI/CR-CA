@@ -16,7 +16,23 @@ export function LogStream({ events }: LogStreamProps) {
   const [searchQuery, setSearchQuery] = useState('');
 
   const logEvents = useMemo(() => {
-    return events.filter((event) => event.type === 'log' || event.type === 'error');
+    // Include all event types that have log-like data
+    return events.filter((event) => 
+      event.type === 'log' || 
+      event.type === 'error' ||
+      event.type === 'initialization_start' ||
+      event.type === 'webcontainer_init' ||
+      event.type === 'api_keys_loaded' ||
+      event.type === 'provider_configured' ||
+      event.type === 'shell_ready' ||
+      event.type === 'executor_ready' ||
+      event.type === 'iteration_start' ||
+      event.type === 'iteration_end' ||
+      event.type === 'governance_check' ||
+      event.type === 'deployment_status' ||
+      event.type === 'budget_warning' ||
+      event.type === 'constraint_violation'
+    );
   }, [events]);
 
   const filteredLogs = useMemo(() => {
@@ -26,6 +42,12 @@ export function LogStream({ events }: LogStreamProps) {
     if (logLevel !== 'all') {
       filtered = filtered.filter((event) => {
         if (event.type === 'error') return logLevel === 'error';
+        if (event.type === 'constraint_violation') return logLevel === 'error';
+        if (event.type === 'budget_warning') return logLevel === 'warn';
+        // For initialization events, treat as info unless they're errors
+        if (['initialization_start', 'webcontainer_init', 'api_keys_loaded', 'provider_configured', 'shell_ready', 'executor_ready'].includes(event.type)) {
+          return logLevel === 'info' || logLevel === 'debug';
+        }
         return event.data.level === logLevel;
       });
     }
@@ -35,7 +57,9 @@ export function LogStream({ events }: LogStreamProps) {
       const query = searchQuery.toLowerCase();
       filtered = filtered.filter((event) => {
         const message = event.data.message?.toLowerCase() || '';
-        return message.includes(query);
+        const source = event.data.source?.toLowerCase() || '';
+        const type = event.type.toLowerCase();
+        return message.includes(query) || source.includes(query) || type.includes(query);
       });
     }
 
@@ -110,9 +134,68 @@ export function LogStream({ events }: LogStreamProps) {
           </div>
         ) : (
           filteredLogs.map((event, index) => {
-            const level = event.type === 'error' ? 'error' : event.data.level || 'info';
+            // Determine level and message based on event type
+            let level: string = 'info';
+            let message: string = '';
+            let eventTypeLabel: string = event.type;
+            
+            if (event.type === 'error' || event.type === 'constraint_violation') {
+              level = 'error';
+              message = event.data.message || event.data.error_message || event.data.violation_details || 'Unknown error';
+            } else if (event.type === 'budget_warning') {
+              level = 'warn';
+              message = event.data.message || 'Budget warning';
+            } else if (event.type === 'log') {
+              level = event.data.level || 'info';
+              message = event.data.message || '';
+            } else if (event.type === 'initialization_start') {
+              level = 'info';
+              message = event.data.message || 'Initialization started';
+              eventTypeLabel = 'INIT';
+            } else if (event.type === 'webcontainer_init') {
+              level = 'debug';
+              message = event.data.message || 'WebContainer initialization';
+              eventTypeLabel = 'WC';
+            } else if (event.type === 'api_keys_loaded') {
+              level = 'info';
+              message = event.data.message || `Loaded ${event.data.keys_count || 0} API key(s)`;
+              eventTypeLabel = 'API';
+            } else if (event.type === 'provider_configured') {
+              level = 'info';
+              message = event.data.message || `Provider configured: ${event.data.provider || 'unknown'}`;
+              eventTypeLabel = 'PROV';
+            } else if (event.type === 'shell_ready') {
+              level = 'info';
+              message = event.data.message || 'Shell terminal ready';
+              eventTypeLabel = 'SHELL';
+            } else if (event.type === 'executor_ready') {
+              level = 'info';
+              message = event.data.message || 'MandateExecutor ready';
+              eventTypeLabel = 'EXEC';
+            } else if (event.type === 'iteration_start') {
+              level = 'info';
+              message = `Iteration ${event.data.iteration_number || event.iteration} started`;
+              eventTypeLabel = 'ITER';
+            } else if (event.type === 'iteration_end') {
+              level = event.data.status === 'failed' ? 'error' : 'info';
+              message = `Iteration ${event.data.iteration_number || event.iteration} ${event.data.status || 'completed'}`;
+              eventTypeLabel = 'ITER';
+            } else if (event.type === 'governance_check') {
+              level = 'info';
+              message = 'Governance check performed';
+              eventTypeLabel = 'GOV';
+            } else if (event.type === 'deployment_status') {
+              level = event.data.deployment_status === 'failed' ? 'error' : 'info';
+              message = event.data.message || `Deployment ${event.data.deployment_status || 'unknown'}`;
+              eventTypeLabel = 'DEPLOY';
+            } else {
+              message = event.data.message || JSON.stringify(event.data);
+            }
+            
             const timestamp = new Date(event.timestamp).toISOString();
-            const message = event.data.message || '';
+            const source = event.data.source || eventTypeLabel;
+            const timing = event.metadata?.init_time || event.metadata?.load_time || event.metadata?.execution_time;
+            const timingStr = timing ? ` (${timing}ms)` : '';
 
             return (
               <div
@@ -123,16 +206,33 @@ export function LogStream({ events }: LogStreamProps) {
                     ? 'bg-red-500/10 border-red-500'
                     : level === 'warn'
                       ? 'bg-yellow-500/10 border-yellow-500'
-                      : 'bg-bolt-elements-background-depth-3 border-bolt-elements-borderColor'
+                      : level === 'debug'
+                        ? 'bg-gray-500/5 border-gray-500/30'
+                        : 'bg-bolt-elements-background-depth-3 border-bolt-elements-borderColor'
                 )}
               >
-                <div className="flex gap-2">
-                  <span className={classNames('font-semibold', getLogColor(level))}>
+                <div className="flex gap-2 items-center flex-wrap">
+                  <span className={classNames('font-semibold text-xs', getLogColor(level))}>
                     [{level.toUpperCase()}]
                   </span>
-                  <span className="text-bolt-elements-textTertiary">{timestamp}</span>
+                  <span className="text-xs font-mono text-bolt-elements-textTertiary">{eventTypeLabel}</span>
+                  <span className="text-xs text-bolt-elements-textTertiary">{timestamp}</span>
+                  {source && source !== eventTypeLabel && (
+                    <span className="text-xs text-bolt-elements-textTertiary">from {source}</span>
+                  )}
+                  {timingStr && (
+                    <span className="text-xs text-bolt-elements-textTertiary">{timingStr}</span>
+                  )}
                 </div>
-                <div className={classNames('mt-1', getLogColor(level))}>{message}</div>
+                <div className={classNames('mt-1 text-sm', getLogColor(level))}>{message}</div>
+                {event.metadata && Object.keys(event.metadata).length > 0 && (
+                  <details className="mt-1 text-xs text-bolt-elements-textTertiary">
+                    <summary className="cursor-pointer hover:text-bolt-elements-textSecondary">Details</summary>
+                    <pre className="mt-1 p-2 bg-bolt-elements-background-depth-2 rounded text-xs overflow-auto">
+                      {JSON.stringify(event.metadata, null, 2)}
+                    </pre>
+                  </details>
+                )}
               </div>
             );
           })
