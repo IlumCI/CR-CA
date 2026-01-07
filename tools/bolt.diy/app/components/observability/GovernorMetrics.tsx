@@ -54,14 +54,22 @@ export function GovernorMetrics({ mandateId }: GovernorMetricsProps) {
     const fetchData = async () => {
       try {
         // Fetch governor state
-        const stateResponse = await fetch(`${governorUrl}/governor/state`);
+        const stateResponse = await fetch(`${governorUrl}/governor/state`, {
+          signal: AbortSignal.timeout(3000) // 3 second timeout
+        });
         if (stateResponse.ok) {
           const stateData = await stateResponse.json() as GovernorState;
           setState(stateData);
+        } else {
+          // Not available, but not an error - Governor is optional
+          setLoading(false);
+          return;
         }
 
         // Fetch governor metrics
-        const metricsResponse = await fetch(`${governorUrl}/governor/metrics`);
+        const metricsResponse = await fetch(`${governorUrl}/governor/metrics`, {
+          signal: AbortSignal.timeout(3000) // 3 second timeout
+        });
         if (metricsResponse.ok) {
           const metricsData = await metricsResponse.json() as GovernorMetrics;
           setMetrics(metricsData);
@@ -69,9 +77,21 @@ export function GovernorMetrics({ mandateId }: GovernorMetricsProps) {
 
         setLoading(false);
       } catch (err) {
-        logger.error('Error fetching governor data:', err);
-        setError(err instanceof Error ? err.message : 'Unknown error');
-        setLoading(false);
+        // Governor service is optional - don't treat as error
+        if (err instanceof Error && (
+          err.name === 'AbortError' || 
+          err.message.includes('NetworkError') ||
+          err.message.includes('Failed to fetch')
+        )) {
+          // Governor service not available - this is expected and OK
+          logger.debug('Governor service not available (this is optional)');
+          setLoading(false);
+          setError(null); // Don't show error for optional service
+        } else {
+          logger.error('Error fetching governor data:', err);
+          setError(err instanceof Error ? err.message : 'Unknown error');
+          setLoading(false);
+        }
       }
     };
 
@@ -91,11 +111,31 @@ export function GovernorMetrics({ mandateId }: GovernorMetricsProps) {
 
   if (error) {
     return (
-      <div className="p-4 text-red-500">
+      <div className="p-4 text-yellow-500">
         <p>Error loading governor metrics: {error}</p>
-        <p className="text-sm text-gray-500 mt-2">
-          Governor may not be enabled or accessible at {governorUrl}
+        <p className="text-sm text-bolt-elements-textSecondary mt-2">
+          Governor service may not be enabled or accessible at {governorUrl}
         </p>
+      </div>
+    );
+  }
+
+  // If Governor service is not available, show a friendly message instead of error
+  if (!state && !loading) {
+    return (
+      <div className="p-4">
+        <div className="bg-bolt-elements-background-depth-2 border border-bolt-elements-borderColor rounded-lg p-6 text-center">
+          <p className="text-bolt-elements-textSecondary mb-2">
+            Execution Governor service is not available
+          </p>
+          <p className="text-sm text-bolt-elements-textTertiary">
+            The Governor service provides queue management and execution metrics.
+            It's optional and bolt.diy works without it.
+          </p>
+          <p className="text-xs text-bolt-elements-textTertiary mt-2">
+            To enable: Start the Governor service at {governorUrl}
+          </p>
+        </div>
       </div>
     );
   }

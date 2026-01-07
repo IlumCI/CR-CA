@@ -79,14 +79,15 @@ function validateMandate(mandate: Mandate): { valid: boolean; errors: string[] }
     }
   }
 
-  // Validate deployment config if present
-  if (mandate.deployment) {
+  // Validate deployment config if enabled
+  if (mandate.deployment?.enabled) {
     if (!mandate.deployment.provider) {
       errors.push('deployment.provider is required when deployment is enabled');
-    }
-    const validProviders = ['netlify', 'vercel', 'github', 'gitlab'];
-    if (!validProviders.includes(mandate.deployment.provider)) {
-      errors.push(`deployment.provider must be one of: ${validProviders.join(', ')}`);
+    } else {
+      const validProviders = ['netlify', 'vercel', 'github', 'gitlab'];
+      if (!validProviders.includes(mandate.deployment.provider)) {
+        errors.push(`deployment.provider must be one of: ${validProviders.join(', ')}`);
+      }
     }
   }
 
@@ -166,6 +167,10 @@ async function mandateAction({ context, request }: ActionFunctionArgs) {
 
           // Initialize event emitter for observability
           const emitter = eventRegistry.getEmitter(mandate.mandate_id);
+          
+          // Store mandate for later retrieval
+          eventRegistry.storeMandate(mandate.mandate_id, mandate);
+          
           emitter.emitLog('info', `Mandate ${mandate.mandate_id} queued in Execution Governor`, 'api');
 
           return new Response(
@@ -194,6 +199,9 @@ async function mandateAction({ context, request }: ActionFunctionArgs) {
     // Direct execution mode (fallback or when governor disabled)
     // Initialize event emitter for this mandate
     const emitter = eventRegistry.getEmitter(mandate.mandate_id);
+    
+    // Store mandate for later retrieval
+    eventRegistry.storeMandate(mandate.mandate_id, mandate);
 
     // Emit initial acceptance event
     emitter.emitIterationStart(0, {
@@ -243,18 +251,76 @@ async function mandateAction({ context, request }: ActionFunctionArgs) {
  */
 export async function loader({ request }: ActionFunctionArgs) {
   const url = new URL(request.url);
+  
+  // Check if this is a request for active mandates list (no mandate_id required)
+  if (url.searchParams.get('list') === 'true') {
+    const allMandateIds = eventRegistry.getActiveMandates();
+    const mandates = allMandateIds.slice(-10).reverse().map(mandateId => {
+      const emitter = eventRegistry.getEmitter(mandateId);
+      const events = emitter.getEvents();
+      const latestEvent = events[events.length - 1];
+      
+      return {
+        mandate_id: mandateId,
+        last_event_time: latestEvent?.timestamp || Date.now() / 1000,
+        event_count: events.length,
+        status: latestEvent?.type === 'iteration_end' ? 'completed' : 
+                latestEvent?.type === 'error' ? 'failed' :
+                events.length > 0 ? 'running' : 'accepted'
+      };
+    });
+
+    return new Response(
+      JSON.stringify({
+        mandates,
+        count: mandates.length,
+      }),
+      {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }
+    );
+  }
+
+  // For other requests, mandate_id is required
   const mandateId = url.searchParams.get('mandate_id');
 
   if (!mandateId) {
     return new Response(
       JSON.stringify({
-        error: 'mandate_id parameter is required',
+        error: 'mandate_id parameter is required (or use ?list=true for mandates list)',
       }),
       {
         status: 400,
         headers: { 'Content-Type': 'application/json' },
       }
     );
+  }
+
+  // Check if this is a request for the mandate object itself
+  if (url.searchParams.get('get') === 'true') {
+    const storedMandate = eventRegistry.getMandate(mandateId);
+    if (storedMandate) {
+      return new Response(
+        JSON.stringify({
+          mandate: storedMandate,
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    } else {
+      return new Response(
+        JSON.stringify({
+          error: 'Mandate not found',
+        }),
+        {
+          status: 404,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    }
   }
 
   // Check if streaming is requested

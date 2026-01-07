@@ -1,0 +1,214 @@
+# Environment variables and secrets
+.env
+.env.*
+.env.local
+.env.production
+.env.development
+.env.test
+*.env
+.envrc
+
+# API keys and credentials
+**/api_keys.json
+**/secrets.json
+**/credentials.json
+**/*.key
+**/*.pem
+**/*.p12
+**/*.pfx
+**/config.local.*
+**/config.production.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+cython_debug/
+
+# Virtual environments
+venv/
+venv_wsl/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+virtualenv/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+.project
+.classpath
+.settings/
+*.code-workspace
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Logs
+*.log
+logs/
+*.log.*
+quant_trading_agent.log
+agent_workspace/*.log
+
+# Error files
+error.txt
+**/error.txt
+agent_workspace/error.txt
+
+# Snapshots and state files
+*_snapshot_*.json
+*.snapshot
+*.state
+*.pickle
+*.pkl
+
+# Node.js (for bolt.diy)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.pnpm-store/
+.pnpm-state/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Build outputs
+build/
+dist/
+*.tsbuildinfo
+.next/
+out/
+.cache/
+.parcel-cache/
+
+# Bolt.diy specific
+tools/bolt.diy/.env*
+tools/bolt.diy/.env.local
+tools/bolt.diy/.env.production
+tools/bolt.diy/.env.development
+tools/bolt.diy/.wrangler/
+tools/bolt.diy/.dev.vars
+tools/bolt.diy/build/
+tools/bolt.diy/.remix/
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+*.dockerignore
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old
+*.orig
+.cache/
+tmp/
+temp/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Coverage reports
+.coverage
+coverage/
+*.cover
+.hypothesis/
+
+# Profiling data
+.prof
+
+# Rancher/Docker credentials
+rancher_credentials.json
+docker_credentials.json
+*.creds
+
+# Local configuration overrides
+config.local.*
+settings.local.*
+local_settings.py
+
+# Secrets and sensitive data
+secrets/
+.secrets/
+**/secrets/
+**/.secrets/
+
+# Test outputs
+.pytest_cache/
+test-results/
+test-output/
+*.test.log
+
+# Agent workspace temporary files
+agent_workspace/tmp/
+agent_workspace/cache/
+agent_workspace/*.tmp
+
+# Package manager lock files (optional - uncomment if you want to ignore)
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+

@@ -10,7 +10,7 @@ This module implements:
 - State estimation (EKF/UKF) for partial observability
 """
 
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Dict, List, Optional, Tuple, Any, Union, Callable
 import numpy as np
 import time
 from dataclasses import dataclass
