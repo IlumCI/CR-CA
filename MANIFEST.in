@@ -1,0 +1,43 @@
+# Include root package files
+include __init__.py
+include CRCA.py
+include README.md
+include LICENSE
+include requirements.txt
+include pyproject.toml
+
+# Include all package subdirectories recursively
+recursive-include utils *
+recursive-include tools *
+recursive-include templates *
+recursive-include schemas *
+recursive-include branches *
+recursive-include prompts *
+
+# Exclude sensitive files and build artifacts
+global-exclude .env
+global-exclude .env.*
+global-exclude .env.local
+global-exclude *.key
+global-exclude *.pem
+global-exclude secrets.json
+global-exclude credentials.json
+global-exclude config.local.*
+global-exclude *_snapshot_*.json
+global-exclude error.txt
+global-exclude *.log
+global-exclude node_modules
+global-exclude venv
+global-exclude venv_wsl
+global-exclude .git
+global-exclude .github
+global-exclude __pycache__
+global-exclude *.pyc
+global-exclude .pytest_cache
+global-exclude dist
+global-exclude build
+global-exclude *.egg-info
+
+# Exclude bolt.diy subdirectory (large web app, not needed in package)
+prune tools/bolt.diy
+
