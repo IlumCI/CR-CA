@@ -101,17 +101,16 @@ Documentation = "https://github.com/IlumCI/CR-CA/blob/main/README.md"
 Issues = "https://github.com/IlumCI/CR-CA/issues"
 
 [tool.hatchling.build.targets.wheel]
-# Include root directory as package (contains __init__.py and CRCA.py)
-# Also include all subdirectories as packages
-packages = [
-  ".",
+# Explicitly include root-level package files and all subdirectories
+# Since package name is 'crca' but root has __init__.py, we use only-include
+only-include = [
+  "__init__.py",
+  "CRCA.py",
   "utils",
   "tools",
   "templates",
   "schemas",
   "branches",
-  "branches.crca_sd",
-  "branches.crca_cg",
   "prompts",
 ]
 # Explicitly exclude sensitive files from the package
