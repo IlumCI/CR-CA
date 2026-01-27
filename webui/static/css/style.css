@@ -1,0 +1,332 @@
+/* CRCA Web UI - European Professional Style */
+/* Muted greys, whites, subtle blues - no bright colors, no rounded corners */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    background-color: #f8f9fa;
+    color: #2c2c2c;
+    line-height: 1.6;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    font-size: 14px;
+}
+
+/* Header */
+.header {
+    background-color: #4a5568;
+    color: #ffffff;
+    padding: 1.25rem 2rem;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+    border-bottom: 2px solid #2d3748;
+}
+
+.header h1 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+.header p {
+    font-size: 0.875rem;
+    opacity: 0.9;
+    margin-top: 0.25rem;
+    font-weight: 300;
+}
+
+/* Controls Bar */
+.controls {
+    background-color: #ffffff;
+    padding: 1rem 2rem;
+    border-bottom: 1px solid #e2e8f0;
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.agent-selector {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.agent-selector label {
+    font-weight: 500;
+    font-size: 0.875rem;
+    color: #4a5568;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.agent-selector select {
+    padding: 0.5rem 1rem;
+    border: 1px solid #cbd5e0;
+    background-color: #ffffff;
+    font-size: 0.875rem;
+    cursor: pointer;
+    color: #2d3748;
+    font-family: inherit;
+    min-width: 200px;
+    transition: border-color 0.2s ease;
+}
+
+.agent-selector select:hover {
+    border-color: #718096;
+}
+
+.agent-selector select:focus {
+    outline: none;
+    border-color: #4a5568;
+    box-shadow: 0 0 0 2px rgba(74, 85, 104, 0.1);
+}
+
+.agent-info {
+    font-size: 0.8125rem;
+    color: #718096;
+    font-style: normal;
+    padding-left: 1rem;
+    border-left: 1px solid #e2e8f0;
+}
+
+/* Chat Container */
+.chat-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background-color: #ffffff;
+    margin: 1rem;
+    border: 1px solid #e2e8f0;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    background-color: #fafbfc;
+}
+
+.chat-messages::-webkit-scrollbar {
+    width: 8px;
+}
+
+.chat-messages::-webkit-scrollbar-track {
+    background: #f1f5f9;
+}
+
+.chat-messages::-webkit-scrollbar-thumb {
+    background: #cbd5e0;
+}
+
+.chat-messages::-webkit-scrollbar-thumb:hover {
+    background: #a0aec0;
+}
+
+/* Messages */
+.message {
+    max-width: 75%;
+    padding: 0.875rem 1.125rem;
+    word-wrap: break-word;
+    border: 1px solid transparent;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.message.user {
+    align-self: flex-end;
+    background-color: #4a5568;
+    color: #ffffff;
+    border-color: #2d3748;
+}
+
+.message.agent {
+    align-self: flex-start;
+    background-color: #ffffff;
+    color: #2d3748;
+    border-color: #e2e8f0;
+}
+
+.message.error {
+    align-self: flex-start;
+    background-color: #c53030;
+    color: #ffffff;
+    border-color: #9b2c2c;
+}
+
+.message-header {
+    font-size: 0.75rem;
+    opacity: 0.85;
+    margin-bottom: 0.375rem;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.message.user .message-header {
+    color: #e2e8f0;
+}
+
+.message.agent .message-header {
+    color: #718096;
+}
+
+.message-content {
+    white-space: pre-wrap;
+    line-height: 1.5;
+    font-size: 0.9375rem;
+}
+
+.message.user .message-content {
+    color: #ffffff;
+}
+
+.message.agent .message-content {
+    color: #2d3748;
+}
+
+/* Input Container */
+.chat-input-container {
+    padding: 1.125rem 1.5rem;
+    border-top: 1px solid #e2e8f0;
+    display: flex;
+    gap: 0.75rem;
+    background-color: #ffffff;
+    align-items: flex-end;
+}
+
+.chat-input {
+    flex: 1;
+    padding: 0.75rem 1rem;
+    border: 1px solid #cbd5e0;
+    background-color: #ffffff;
+    font-size: 0.9375rem;
+    font-family: inherit;
+    resize: none;
+    min-height: 50px;
+    max-height: 150px;
+    color: #2d3748;
+    line-height: 1.5;
+    transition: border-color 0.2s ease;
+}
+
+.chat-input:focus {
+    outline: none;
+    border-color: #4a5568;
+    box-shadow: 0 0 0 2px rgba(74, 85, 104, 0.1);
+}
+
+.chat-input:disabled {
+    background-color: #f7fafc;
+    color: #a0aec0;
+    cursor: not-allowed;
+}
+
+.chat-input::placeholder {
+    color: #a0aec0;
+}
+
+.send-button {
+    padding: 0.75rem 1.75rem;
+    background-color: #4a5568;
+    color: #ffffff;
+    border: 1px solid #2d3748;
+    font-size: 0.9375rem;
+    cursor: pointer;
+    font-weight: 500;
+    transition: background-color 0.2s ease, border-color 0.2s ease;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-size: 0.8125rem;
+    min-width: 100px;
+    height: 50px;
+}
+
+.send-button:hover:not(:disabled) {
+    background-color: #2d3748;
+    border-color: #1a202c;
+}
+
+.send-button:active:not(:disabled) {
+    background-color: #1a202c;
+}
+
+.send-button:disabled {
+    background-color: #cbd5e0;
+    border-color: #a0aec0;
+    color: #718096;
+    cursor: not-allowed;
+}
+
+.send-button:focus {
+    outline: none;
+    box-shadow: 0 0 0 2px rgba(74, 85, 104, 0.2);
+}
+
+/* Loading Indicator */
+.loading {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(255, 255, 255, 0.3);
+    border-top: 2px solid #ffffff;
+    animation: spin 0.8s linear infinite;
+    margin-right: 0.5rem;
+    vertical-align: middle;
+}
+
+@keyframes spin {
+    0% {
+        transform: rotate(0deg);
+    }
+    100% {
+        transform: rotate(360deg);
+    }
+}
+
+/* Empty State */
+.empty-state {
+    text-align: center;
+    color: #a0aec0;
+    padding: 3rem;
+    font-style: italic;
+    font-size: 0.9375rem;
+}
+
+/* Typography Enhancements */
+h1, h2, h3, h4, h5, h6 {
+    font-weight: 600;
+    color: #2d3748;
+}
+
+/* Focus States */
+*:focus {
+    outline: none;
+}
+
+select:focus,
+input:focus,
+textarea:focus,
+button:focus {
+    outline: none;
+}
+
+/* Selection */
+::selection {
+    background-color: #4a5568;
+    color: #ffffff;
+}
+
+::-moz-selection {
+    background-color: #4a5568;
+    color: #ffffff;
+}

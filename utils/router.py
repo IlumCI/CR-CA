@@ -24,7 +24,7 @@ from swarms.structs.concurrent_workflow import ConcurrentWorkflow
 from swarms.structs.council_as_judge import CouncilAsAJudge
 # DebateWithJudge may not be available - make optional
 try:
-from swarms.structs.debate_with_judge import DebateWithJudge
+    from swarms.structs.debate_with_judge import DebateWithJudge
 except ImportError:
     DebateWithJudge = None  # Will be handled in factory
 from swarms.structs.groupchat import GroupChat
@@ -43,7 +43,7 @@ from swarms.utils.loguru_logger import initialize_logger
 from swarms.utils.output_types import OutputType
 # LLMCouncil may not be available - make optional
 try:
-from swarms.structs.llm_council import LLMCouncil
+    from swarms.structs.llm_council import LLMCouncil
 except ImportError:
     LLMCouncil = None  # Will be handled in factory
 from swarms.structs.round_robin import RoundRobinSwarm

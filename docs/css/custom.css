@@ -1,0 +1,84 @@
+/* EuroSwarms-inspired custom styling for CR-CA documentation */
+
+/* Typography - Serif headings, sans-serif body */
+:root {
+  --md-text-font: "Inter", "Helvetica Neue", Arial, sans-serif;
+  --md-code-font: "Roboto Mono", monospace;
+}
+
+/* Override heading fonts to use serif */
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4,
+.md-typeset h5,
+.md-typeset h6 {
+  font-family: "Crimson Text", Georgia, "Times New Roman", serif;
+  font-weight: 600;
+}
+
+/* Background color matching EuroSwarms */
+body {
+  background-color: #F5F7FA;
+}
+
+.md-typeset {
+  color: #1A1A1A;
+}
+
+/* Custom list bullets using ▸ character */
+.md-typeset ul li::marker {
+  content: "▸ ";
+  color: #1A1A1A;
+}
+
+/* Card-based sections with subtle shadows */
+.md-typeset .admonition,
+.md-typeset details {
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  border-radius: 4px;
+}
+
+/* Code blocks with subtle borders */
+.md-typeset pre {
+  border: 1px solid #E0E0E0;
+  border-radius: 4px;
+}
+
+/* Links with subtle underline on hover */
+.md-typeset a {
+  color: #1A1A1A;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.2s;
+}
+
+.md-typeset a:hover {
+  border-bottom-color: #1A1A1A;
+}
+
+/* Spacing adjustments */
+.md-typeset {
+  line-height: 1.7;
+}
+
+.md-typeset p {
+  margin-bottom: 1em;
+}
+
+/* Navigation styling */
+.md-nav__title {
+  font-family: "Crimson Text", Georgia, "Times New Roman", serif;
+}
+
+/* Math rendering improvements */
+.MathJax {
+  font-size: 1.1em;
+}
+
+/* Responsive adjustments */
+@media screen and (max-width: 76.25em) {
+  .md-nav--primary .md-nav__title {
+    font-family: "Crimson Text", Georgia, "Times New Roman", serif;
+  }
+}

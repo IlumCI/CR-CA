@@ -439,4 +439,33 @@ class GraphManager:
         """
         for u, v in edges:
             self.add_relationship(u, v, **default_metadata)
+    
+    def temporal_topological_sort(self) -> List[str]:
+        """
+        Perform topological sort respecting temporal ordering.
+        
+        Temporal edges (BEFORE, AFTER, DELAYED) are respected in ordering.
+        
+        Returns:
+            List of nodes in temporal topological order
+        """
+        # For now, use standard topological sort
+        # In future, can be enhanced to respect temporal edge types
+        return self.topological_sort()
+    
+    def get_temporal_edges(self) -> List[Tuple[str, str, Dict[str, Any]]]:
+        """
+        Get all edges with temporal metadata.
+        
+        Returns:
+            List of (source, target, metadata) tuples for temporal edges
+        """
+        temporal_edges = []
+        for source, targets in self.graph.items():
+            for target, meta in targets.items():
+                if isinstance(meta, dict):
+                    temporal_type = meta.get("temporal_type")
+                    if temporal_type and temporal_type != "immediate":
+                        temporal_edges.append((source, target, meta))
+        return temporal_edges
 

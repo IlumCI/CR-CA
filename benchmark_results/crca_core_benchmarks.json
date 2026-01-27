@@ -1,0 +1,178 @@
+{
+  "benchmarks": [
+    {
+      "result_type": "BenchmarkResult",
+      "benchmark": "linear_gaussian_chain",
+      "provenance": {
+        "run_id": "116d10c6-dd8a-4bd1-a19b-d1dde4192c23",
+        "timestamp_utc": "2026-01-24T00:15:54.840013+00:00",
+        "spec_hash": "ef1c101c6e1f853994f418127f20b81ace7f4a5dfd4ad1f75011c0d7612221ad",
+        "data_hash": null,
+        "library_versions": {
+          "python": "3.14.2",
+          "platform": "Windows-10-10.0.19044-SP0"
+        },
+        "random_seeds": {
+          "numpy": 1
+        },
+        "algorithm_config": {
+          "benchmark": "linear_gaussian_chain"
+        },
+        "hardware_notes": null
+      },
+      "metrics": {
+        "abduction_max_abs_error": 1.1102230246251565e-16
+      },
+      "artifacts": {
+        "factual": {
+          "X0": 0.345584192064786,
+          "X1": 1.1326439163594657,
+          "X2": 1.3498166009069061,
+          "X3": -0.08832229078814535
+        },
+        "counterfactual": {
+          "X0": 1.345584192064786,
+          "X1": 2.032643916359466,
+          "X2": 2.1598166009069066,
+          "X3": 0.6406777092118552
+        },
+        "notes": [
+          "This benchmark checks abduction correctness (noise recovery) under full observability.",
+          "Counterfactual uses abduction\u2013action\u2013prediction with fixed exogenous noise."
+        ]
+      }
+    },
+    {
+      "result_type": "BenchmarkResult",
+      "benchmark": "identification",
+      "provenance": {
+        "run_id": "f7724b4a-e289-45b4-8678-7b25f53c634d",
+        "timestamp_utc": "2026-01-24T00:15:54.841337+00:00",
+        "spec_hash": "5993a3988c56bf780cdf380e1d583aef633b4984d92c47af74a20aeacdc7c312",
+        "data_hash": null,
+        "library_versions": {
+          "python": "3.14.2",
+          "platform": "Windows-10-10.0.19044-SP0"
+        },
+        "random_seeds": {},
+        "algorithm_config": {},
+        "hardware_notes": null
+      },
+      "metrics": {},
+      "artifacts": {
+        "identifiable_case": {
+          "result_type": "IdentificationResult",
+          "provenance": {
+            "run_id": "89d3c7f1-1192-4810-882e-26178d164cea",
+            "timestamp_utc": "2026-01-24T00:15:54.840274+00:00",
+            "spec_hash": "ac1a7f2ad5f6987c2bd5bcab24ed0e00a9fe91cc58f826aedd347a1c4afe7485",
+            "data_hash": null,
+            "library_versions": {
+              "python": "3.14.2",
+              "platform": "Windows-10-10.0.19044-SP0"
+            },
+            "random_seeds": {},
+            "algorithm_config": {},
+            "hardware_notes": null
+          },
+          "assumptions": [],
+          "limitations": [],
+          "artifacts": {},
+          "method": "backdoor",
+          "estimand_expression": "sum_{z} P(Y|X,z) P(z)",
+          "assumptions_used": [
+            "Backdoor criterion holds with the returned adjustment set.",
+            "No unmeasured confounding conditional on Z.",
+            "Positivity/overlap for adjustment set."
+          ],
+          "witnesses": {
+            "adjustment_set": []
+          }
+        },
+        "latent_confounder_case": {
+          "result_type": "IdentificationResult",
+          "provenance": {
+            "run_id": "eede5b84-87b3-440f-8bbd-806414da1c65",
+            "timestamp_utc": "2026-01-24T00:15:54.841222+00:00",
+            "spec_hash": "4c10d99fa36dab1db0d2c447e4ca53ae3c97ae5417e822bd581519a817ad1849",
+            "data_hash": null,
+            "library_versions": {
+              "python": "3.14.2",
+              "platform": "Windows-10-10.0.19044-SP0"
+            },
+            "random_seeds": {},
+            "algorithm_config": {},
+            "hardware_notes": null
+          },
+          "assumptions": [],
+          "limitations": [],
+          "artifacts": {},
+          "method": "backdoor",
+          "estimand_expression": "sum_{z} P(Y|X,z) P(z)",
+          "assumptions_used": [
+            "Backdoor criterion holds with the returned adjustment set.",
+            "No unmeasured confounding conditional on Z.",
+            "Positivity/overlap for adjustment set."
+          ],
+          "witnesses": {
+            "adjustment_set": []
+          }
+        }
+      }
+    },
+    {
+      "result_type": "BenchmarkResult",
+      "benchmark": "discovery",
+      "provenance": {
+        "run_id": "e981afd2-56be-4191-be89-2d5ce369ffb4",
+        "timestamp_utc": "2026-01-24T00:15:55.601239+00:00",
+        "spec_hash": "221827b0c5dee7dca1d7b1ad0bdf4781ad8b225bc469e8c86e7d0ce5601a19c1",
+        "data_hash": null,
+        "library_versions": {
+          "python": "3.14.2",
+          "platform": "Windows-10-10.0.19044-SP0"
+        },
+        "random_seeds": {},
+        "algorithm_config": {},
+        "hardware_notes": null
+      },
+      "metrics": {},
+      "artifacts": {
+        "tabular": {
+          "result_type": "Refusal",
+          "reason_codes": [
+            "UNSUPPORTED_OPERATION"
+          ],
+          "message": "Tabular causal discovery backend not available.",
+          "checklist": [
+            {
+              "item": "Install causal-learn",
+              "rationale": "Tabular discovery is wrap-first; we refuse rather than run unvalidated heuristics."
+            }
+          ],
+          "suggested_next_steps": [
+            "pip install causal-learn"
+          ],
+          "details": null
+        },
+        "timeseries": {
+          "result_type": "Refusal",
+          "reason_codes": [
+            "UNSUPPORTED_OPERATION"
+          ],
+          "message": "Time-series causal discovery backend (tigramite) not available.",
+          "checklist": [
+            {
+              "item": "Install tigramite",
+              "rationale": "PCMCI/PCMCI+ discovery is wrap-first; we refuse rather than run unvalidated heuristics."
+            }
+          ],
+          "suggested_next_steps": [
+            "pip install tigramite"
+          ],
+          "details": null
+        }
+      }
+    }
+  ]
+}

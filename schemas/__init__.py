@@ -22,6 +22,20 @@ from schemas.policy import (
     ModelState
 )
 
+from schemas.annotation import (
+    PrimitiveEntity,
+    Line,
+    Circle,
+    Contour,
+    Intersection,
+    SemanticLabel,
+    Relation,
+    Contradiction,
+    Claim,
+    AnnotationGraph,
+    AnnotationResult
+)
+
 __all__ = [
     "DoctrineV1",
     "CompiledPolicy",
@@ -38,6 +52,17 @@ __all__ = [
     "LedgerEvent",
     "InterventionSpec",
     "Intervention",
-    "ModelState"
+    "ModelState",
+    "PrimitiveEntity",
+    "Line",
+    "Circle",
+    "Contour",
+    "Intersection",
+    "SemanticLabel",
+    "Relation",
+    "Contradiction",
+    "Claim",
+    "AnnotationGraph",
+    "AnnotationResult"
 ]
 
