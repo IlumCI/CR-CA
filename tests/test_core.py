@@ -4,9 +4,8 @@ import importlib.util
 
 def load_crca_module():
     repo_root = os.path.dirname(os.path.dirname(__file__))
-    # CRCA.py lives inside the ceca_lite package directory
-    # In this repository layout the implementation file is `CRCA.py` under CR-CA
-    target = os.path.join(repo_root, "CR-CA", "CRCA.py")
+    # In this repository layout the implementation file is `CRCA.py` at repo root.
+    target = os.path.join(repo_root, "CRCA.py")
     spec = importlib.util.spec_from_file_location("crca_module", target)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

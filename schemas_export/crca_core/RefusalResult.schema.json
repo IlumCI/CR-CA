@@ -1,0 +1,90 @@
+{
+  "$defs": {
+    "RefusalChecklistItem": {
+      "description": "A single required input/action needed to proceed.",
+      "properties": {
+        "item": {
+          "minLength": 1,
+          "title": "Item",
+          "type": "string"
+        },
+        "rationale": {
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item",
+        "rationale"
+      ],
+      "title": "RefusalChecklistItem",
+      "type": "object"
+    },
+    "RefusalReasonCode": {
+      "description": "Stable reason codes for refusal-first behavior.",
+      "enum": [
+        "SPEC_NOT_LOCKED",
+        "NO_SCM_FOR_COUNTERFACTUAL",
+        "NOT_IDENTIFIABLE",
+        "TIME_INDEX_INVALID",
+        "ASSUMPTIONS_UNDECLARED",
+        "INPUT_INVALID",
+        "UNSUPPORTED_OPERATION"
+      ],
+      "title": "RefusalReasonCode",
+      "type": "string"
+    }
+  },
+  "description": "Structured refusal (no numeric causal output).",
+  "properties": {
+    "result_type": {
+      "default": "Refusal",
+      "title": "Result Type",
+      "type": "string"
+    },
+    "reason_codes": {
+      "items": {
+        "$ref": "#/$defs/RefusalReasonCode"
+      },
+      "title": "Reason Codes",
+      "type": "array"
+    },
+    "message": {
+      "minLength": 1,
+      "title": "Message",
+      "type": "string"
+    },
+    "checklist": {
+      "items": {
+        "$ref": "#/$defs/RefusalChecklistItem"
+      },
+      "title": "Checklist",
+      "type": "array"
+    },
+    "suggested_next_steps": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Suggested Next Steps",
+      "type": "array"
+    },
+    "details": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Details"
+    }
+  },
+  "required": [
+    "message"
+  ],
+  "title": "RefusalResult",
+  "type": "object"
+}

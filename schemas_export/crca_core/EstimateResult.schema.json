@@ -1,0 +1,113 @@
+{
+  "$defs": {
+    "ProvenanceManifest": {
+      "description": "Required provenance for every `crca_core` result.",
+      "properties": {
+        "run_id": {
+          "title": "Run Id",
+          "type": "string"
+        },
+        "timestamp_utc": {
+          "title": "Timestamp Utc",
+          "type": "string"
+        },
+        "spec_hash": {
+          "title": "Spec Hash",
+          "type": "string"
+        },
+        "data_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Data Hash"
+        },
+        "library_versions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Library Versions",
+          "type": "object"
+        },
+        "random_seeds": {
+          "additionalProperties": true,
+          "title": "Random Seeds",
+          "type": "object"
+        },
+        "algorithm_config": {
+          "additionalProperties": true,
+          "title": "Algorithm Config",
+          "type": "object"
+        },
+        "hardware_notes": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hardware Notes"
+        }
+      },
+      "required": [
+        "spec_hash"
+      ],
+      "title": "ProvenanceManifest",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "result_type": {
+      "const": "EstimateResult",
+      "default": "EstimateResult",
+      "title": "Result Type",
+      "type": "string"
+    },
+    "provenance": {
+      "$ref": "#/$defs/ProvenanceManifest"
+    },
+    "assumptions": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Assumptions",
+      "type": "array"
+    },
+    "limitations": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Limitations",
+      "type": "array"
+    },
+    "artifacts": {
+      "additionalProperties": true,
+      "title": "Artifacts",
+      "type": "object"
+    },
+    "estimate": {
+      "additionalProperties": true,
+      "title": "Estimate",
+      "type": "object"
+    },
+    "refutations": {
+      "additionalProperties": true,
+      "title": "Refutations",
+      "type": "object"
+    }
+  },
+  "required": [
+    "provenance"
+  ],
+  "title": "EstimateResult",
+  "type": "object"
+}

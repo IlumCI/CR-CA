@@ -1,0 +1,21 @@
+/* Additional custom styles for CR-CA documentation */
+
+/* Ensure MathJax renders properly */
+.MathJax {
+  font-size: 1.1em;
+}
+
+/* Math display blocks */
+.MathJax_Display {
+  margin: 1em 0;
+}
+
+/* Code blocks with math */
+.md-typeset code {
+  font-family: "Roboto Mono", monospace;
+}
+
+/* Ensure proper spacing for math */
+.md-typeset .arithmatex {
+  margin: 0.5em 0;
+}

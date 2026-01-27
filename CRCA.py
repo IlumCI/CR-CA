@@ -72,6 +72,20 @@ except ImportError:
     # Fallback if prompt file doesn't exist
     DEFAULT_CRCA_SYSTEM_PROMPT = None
 
+# Image annotation imports (optional - graceful fallback if not available)
+try:
+    from image_annotation.annotation_engine import ImageAnnotationEngine
+    IMAGE_ANNOTATION_AVAILABLE = True
+except ImportError:
+    IMAGE_ANNOTATION_AVAILABLE = False
+    logger.debug("Image annotation engine not available")
+except Exception as e:
+    IMAGE_ANNOTATION_AVAILABLE = False
+    logger.warning(f"Image annotation engine import failed: {e}")
+
+# Global singleton for image annotation engine (lazy-loaded)
+_image_annotation_engine: Optional[Any] = None
+
 # Policy engine imports (optional - only if policy_mode is enabled)
 try:
     from schemas.policy import DoctrineV1
@@ -774,6 +788,13 @@ class CRCAAgent(Agent):
         cr_ca_schema = CRCAAgent._get_cr_ca_schema()
         extract_variables_schema = CRCAAgent._get_extract_variables_schema()
         
+        # Get image annotation schemas if available
+        image_annotation_schema = None
+        image_query_schema = None
+        if IMAGE_ANNOTATION_AVAILABLE:
+            image_annotation_schema = CRCAAgent._get_image_annotation_schema()
+            image_query_schema = CRCAAgent._get_image_query_schema()
+        
         # Backwards-compatible alias for description
         agent_description = description or agent_description
 
@@ -788,15 +809,18 @@ class CRCAAgent(Agent):
         # Merge tools_list_dictionary from kwargs with CRCA schema
         # Only add CRCA schema if user hasn't explicitly disabled it
         use_crca_tools = kwargs.pop("use_crca_tools", True)  # Default to True for backwards compatibility
+        use_image_annotation = kwargs.pop("use_image_annotation", True)  # Default to True if available
         existing_tools = kwargs.pop("tools_list_dictionary", [])
         if not isinstance(existing_tools, list):
             existing_tools = [existing_tools] if existing_tools else []
         
-        # Only add CRCA schemas if enabled
+        # Build tools list
+        tools_list = []
         if use_crca_tools:
-            tools_list = [cr_ca_schema, extract_variables_schema] + existing_tools
-        else:
-            tools_list = existing_tools
+            tools_list.extend([cr_ca_schema, extract_variables_schema])
+        if use_image_annotation and IMAGE_ANNOTATION_AVAILABLE and image_annotation_schema and image_query_schema:
+            tools_list.extend([image_annotation_schema, image_query_schema])
+        tools_list.extend(existing_tools)
         
         # Get existing callable tools (functions) from kwargs
         existing_callable_tools = kwargs.pop("tools", [])
@@ -844,6 +868,9 @@ class CRCAAgent(Agent):
         super().__init__(**agent_kwargs)
         
         # Now that self exists, create and add the CRCA tool handlers if tools are enabled
+        # Store use_image_annotation for later use
+        self._use_image_annotation = use_image_annotation if IMAGE_ANNOTATION_AVAILABLE else False
+        
         if use_crca_tools:
             # Create a wrapper function with the correct name that matches the schema
             def generate_causal_analysis(
@@ -886,17 +913,77 @@ class CRCAAgent(Agent):
             self.add_tool(generate_causal_analysis)
             self.add_tool(extract_causal_variables)
             
+            # Add image annotation tools if available
+            if self._use_image_annotation and IMAGE_ANNOTATION_AVAILABLE:
+                def annotate_image(
+                    image_path: str,
+                    output_format: str = "all",
+                    frame_id: Optional[int] = None
+                ) -> Dict[str, Any]:
+                    """Tool handler for annotate_image."""
+                    engine = CRCAAgent._get_image_annotation_engine()
+                    if engine is None:
+                        return {"error": "Image annotation engine not available"}
+                    try:
+                        result = engine.annotate(image_path, frame_id=frame_id, output=output_format)
+                        if output_format == "overlay":
+                            return {"overlay_image": "numpy array returned", "shape": str(result.shape) if hasattr(result, 'shape') else "unknown"}
+                        elif output_format == "json":
+                            return result
+                        elif output_format == "report":
+                            return {"report": result}
+                        else:  # all
+                            return {
+                                "entities": len(result.annotation_graph.entities),
+                                "labels": len(result.annotation_graph.labels),
+                                "contradictions": len(result.annotation_graph.contradictions),
+                                "processing_time": result.processing_time,
+                                "formal_report": result.formal_report[:500] + "..." if len(result.formal_report) > 500 else result.formal_report,
+                                "json_summary": {k: str(v)[:200] for k, v in list(result.json_output.items())[:5]}
+                            }
+                    except Exception as e:
+                        logger.error(f"Error in annotate_image tool: {e}")
+                        return {"error": str(e)}
+                
+                def query_image(
+                    image_path: str,
+                    query: str,
+                    frame_id: Optional[int] = None
+                ) -> Dict[str, Any]:
+                    """Tool handler for query_image."""
+                    engine = CRCAAgent._get_image_annotation_engine()
+                    if engine is None:
+                        return {"error": "Image annotation engine not available"}
+                    try:
+                        result = engine.query(image_path, query, frame_id=frame_id)
+                        return {
+                            "answer": result["answer"],
+                            "entities_found": len(result["entities"]),
+                            "measurements": result["measurements"],
+                            "confidence": result["confidence"],
+                            "reasoning": result["reasoning"][:500] + "..." if len(result["reasoning"]) > 500 else result["reasoning"]
+                        }
+                    except Exception as e:
+                        logger.error(f"Error in query_image tool: {e}")
+                        return {"error": str(e)}
+                
+                self.add_tool(annotate_image)
+                self.add_tool(query_image)
+            
             # CRITICAL: Re-initialize tool_struct after adding tools
             # This ensures the BaseTool instance has the updated tools and function_map
             if hasattr(self, 'setup_tools'):
                 self.tool_struct = self.setup_tools()
             
             # Ensure tools_list_dictionary is set with our manual schemas
+            our_tool_names = {"generate_causal_analysis", "extract_causal_variables"}
+            if self._use_image_annotation and IMAGE_ANNOTATION_AVAILABLE:
+                our_tool_names.update({"annotate_image", "query_image"})
+            
             if not self.tools_list_dictionary or len(self.tools_list_dictionary) == 0:
-                self.tools_list_dictionary = [cr_ca_schema, extract_variables_schema] + existing_tools
+                self.tools_list_dictionary = tools_list
             else:
                 # Replace any auto-generated schemas with our manual ones
-                our_tool_names = {"generate_causal_analysis", "extract_causal_variables"}
                 filtered = []
                 for schema in self.tools_list_dictionary:
                     if isinstance(schema, dict):
@@ -905,7 +992,7 @@ class CRCAAgent(Agent):
                             continue  # Skip auto-generated, we'll add manual
                     filtered.append(schema)
                 # Add our manual schemas first, then existing tools
-                self.tools_list_dictionary = [cr_ca_schema, extract_variables_schema] + filtered
+                self.tools_list_dictionary = tools_list + filtered
         
         self.causal_max_loops = max_loops
         self.causal_graph: Dict[str, Dict[str, float]] = {}
@@ -1073,6 +1160,80 @@ class CRCAAgent(Agent):
             }
         }
 
+    @staticmethod
+    def _get_image_annotation_schema() -> Dict[str, Any]:
+        """Get schema for annotate_image tool."""
+        return {
+            "type": "function",
+            "function": {
+                "name": "annotate_image",
+                "description": "Annotate an image with geometric primitives, semantic labels, and measurements. Automatically detects image type, tunes parameters, and extracts primitives (lines, circles, contours). Returns overlay image, formal report, and JSON data.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "image_path": {
+                            "type": "string",
+                            "description": "Path to image file, URL, or description of image location"
+                        },
+                        "output_format": {
+                            "type": "string",
+                            "enum": ["overlay", "json", "report", "all"],
+                            "default": "all",
+                            "description": "Output format: 'overlay' (numpy array), 'json' (structured data), 'report' (text), 'all' (AnnotationResult)"
+                        },
+                        "frame_id": {
+                            "type": "integer",
+                            "description": "Optional frame ID for temporal tracking in video sequences"
+                        }
+                    },
+                    "required": ["image_path"]
+                }
+            }
+        }
+    
+    @staticmethod
+    def _get_image_query_schema() -> Dict[str, Any]:
+        """Get schema for query_image tool."""
+        return {
+            "type": "function",
+            "function": {
+                "name": "query_image",
+                "description": "Answer a specific query about an image using natural language. Performs annotation first, then analyzes the results to answer questions like 'find the largest building', 'measure dimensions', 'count objects', etc.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "image_path": {
+                            "type": "string",
+                            "description": "Path to image file, URL, or description of image location"
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "Natural language query about the image (e.g., 'find the largest building and measure its dimensions', 'count how many circles are in the image', 'identify all lines and measure their lengths')"
+                        },
+                        "frame_id": {
+                            "type": "integer",
+                            "description": "Optional frame ID for temporal tracking"
+                        }
+                    },
+                    "required": ["image_path", "query"]
+                }
+            }
+        }
+    
+    @staticmethod
+    def _get_image_annotation_engine() -> Optional[Any]:
+        """Get or create singleton image annotation engine instance."""
+        global _image_annotation_engine
+        if not IMAGE_ANNOTATION_AVAILABLE:
+            return None
+        if _image_annotation_engine is None:
+            try:
+                _image_annotation_engine = ImageAnnotationEngine()
+            except Exception as e:
+                logger.error(f"Failed to initialize image annotation engine: {e}")
+                return None
+        return _image_annotation_engine
+    
     @staticmethod
     def _get_extract_variables_schema() -> Dict[str, Any]:
         """

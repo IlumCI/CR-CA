@@ -46,6 +46,8 @@ dependencies = [
   "rustworkx>=0.12.0",
   "networkx>=3.0",
   "dowhy>=0.8",
+  "causal-learn>=0.1.3.9",
+  "tigramite>=5.2.0",
   "optuna>=3.0",
   "torch>=2.0.0",
   "scikit-learn>=1.3",
@@ -80,6 +82,10 @@ dependencies = [
   "swarms",
   "litellm>=0.1",
   "psutil>=5.9.0",
+  "transformers>=4.39.0",
+  "datasets>=2.16.0",
+  "accelerate>=0.26.0",
+  "peft>=0.9.0",
 ]
 
 [project.optional-dependencies]
@@ -108,6 +114,9 @@ packages = [
   "tools",
   "templates", 
   "schemas",
+  "crca_core",
+  "crca_llm",
+  "crca_sd",
   "branches",
   "branches.crca_sd",
   "branches.crca_cg",
@@ -145,6 +154,12 @@ exclude = [
 minversion = "7.0"
 addopts = "-q"
 testpaths = ["tests"]
+filterwarnings = [
+  "ignore:.*asyncio.iscoroutinefunction.*:DeprecationWarning:litellm.*",
+  "ignore:.*setParseAction.*:DeprecationWarning:pydot.*",
+  "ignore:Series.__getitem__.*:FutureWarning:dowhy.*",
+  "ignore:divide by zero encountered in scalar divide:RuntimeWarning:statsmodels.*",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["."]

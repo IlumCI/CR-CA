@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CRCA Web UI</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="header">
+        <h1>CRCA Web UI</h1>
+        <p>Causal Reasoning with Counterfactual Analysis</p>
+    </div>
+
+    <div class="controls">
+        <div class="agent-selector">
+            <label for="agentSelect">Agent:</label>
+            <select id="agentSelect">
+                <option value="">Loading...</option>
+            </select>
+        </div>
+        <div class="agent-info" id="agentInfo"></div>
+    </div>
+
+    <div class="chat-container">
+        <div class="chat-messages" id="chatMessages">
+            <div class="empty-state">Start a conversation by typing a message below.</div>
+        </div>
+        <div class="chat-input-container">
+            <textarea 
+                id="chatInput" 
+                class="chat-input" 
+                placeholder="Type your message here..."
+                rows="1"
+            ></textarea>
+            <button id="sendButton" class="send-button">Send</button>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

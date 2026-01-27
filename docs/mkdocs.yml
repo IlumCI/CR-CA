@@ -1,0 +1,238 @@
+site_name: CR-CA Documentation
+site_description: Causal Reasoning and Counterfactual Analysis Framework
+site_author: CR-CA Contributors
+site_url: https://github.com/IlumCI/CR-CA
+
+repo_name: IlumCI/CR-CA
+repo_url: https://github.com/IlumCI/CR-CA
+edit_uri: edit/main/docs/
+
+copyright: Copyright &copy; 2024-2026 CR-CA Contributors
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: blue
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Inter
+    code: Roboto Mono
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.annotate
+    - content.tabs.link
+    - content.code.copy
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - admonition
+  - pymdownx.details
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - attr_list
+  - md_in_html
+  - toc:
+      permalink: true
+      toc_depth: 3
+
+plugins:
+  - search:
+      lang: en
+  - minify:
+      minify_html: true
+  - git-revision-date-localized:
+      enable_creation_date: true
+      type: date
+  - mermaid2
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [..]
+          selection:
+            docstring_style: google
+          rendering:
+            show_source: true
+            show_root_heading: true
+            show_root_toc_entry: true
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://polyfill.io/v3/polyfill.min.js?features=es6
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+extra_css:
+  - css/custom.css
+  - stylesheets/extra.css
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quickstart: getting-started/quickstart.md
+    - Configuration: getting-started/configuration.md
+    - First Agent: getting-started/first-agent.md
+  - Core Modules:
+    - CRCAAgent:
+      - Overview: core/crcagent/overview.md
+      - Initialization: core/crcagent/initialization.md
+      - Automatic Extraction: core/crcagent/automatic-extraction.md
+      - Dual-Mode Operation: core/crcagent/dual-mode-operation.md
+      - Causal Graph: core/crcagent/causal-graph.md
+      - Deterministic Simulation: core/crcagent/deterministic-simulation.md
+      - Counterfactuals: core/crcagent/counterfactuals.md
+      - Batch Prediction: core/crcagent/batch-prediction.md
+      - Async Operations: core/crcagent/async-operations.md
+      - Optimization: core/crcagent/optimization.md
+      - Time-Series: core/crcagent/time-series.md
+      - Bayesian Inference: core/crcagent/bayesian-inference.md
+    - Utils:
+      - Overview: core/utils/overview.md
+      - Router: core/utils/router.md
+      - Conversation: core/utils/conversation.md
+      - Graph Reasoner: core/utils/graph-reasoner.md
+      - Utilities: core/utils/utilities.md
+    - Templates:
+      - Overview: core/templates/overview.md
+      - Base Agent: core/templates/base-agent.md
+      - Feature Mixins: core/templates/feature-mixins.md
+      - Templates Guide: core/templates/templates-guide.md
+    - Schemas:
+      - Overview: core/schemas/overview.md
+      - Annotation: core/schemas/annotation.md
+      - Core Schemas: core/schemas/core-schemas.md
+      - Policy: core/schemas/policy.md
+    - Tools:
+      - Overview: core/tools/overview.md
+      - MCP Client: core/tools/mcp-client.md
+  - Branches:
+    - CRCA-Q:
+      - Overview: branches/crca-q/overview.md
+      - Philosophy: branches/crca-q/philosophy.md
+      - Architecture: branches/crca-q/architecture.md
+      - Market Data: branches/crca-q/market-data.md
+      - Alternative Data: branches/crca-q/alternative-data.md
+      - Signal Generation: branches/crca-q/signal-generation.md
+      - Causal Engine: branches/crca-q/causal-engine.md
+      - Signal Validation: branches/crca-q/signal-validation.md
+      - Portfolio Optimization: branches/crca-q/portfolio-optimization.md
+      - Risk Management: branches/crca-q/risk-management.md
+      - Execution: branches/crca-q/execution.md
+      - Backtesting: branches/crca-q/backtesting.md
+      - Setup: branches/crca-q/setup.md
+    - CRCA-SD:
+      - Overview: branches/crca-sd/overview.md
+      - Core: branches/crca-sd/core.md
+      - MPC Solver: branches/crca-sd/mpc-solver.md
+      - Governance: branches/crca-sd/governance.md
+      - Real-Time: branches/crca-sd/realtime.md
+      - TUI: branches/crca-sd/tui.md
+    - CRCA-CG:
+      - Overview: branches/crca-cg/overview.md
+      - CorporateSwarm: branches/crca-cg/corposwarm.md
+      - ESG Scoring: branches/crca-cg/esg-scoring.md
+      - Multi-Agent: branches/crca-cg/multi-agent.md
+    - General Agent:
+      - Overview: branches/general-agent/overview.md
+      - Personality: branches/general-agent/personality.md
+      - Prompt Builder: branches/general-agent/prompt-builder.md
+  - Features:
+    - Image Annotation:
+      - Overview: features/image-annotation/overview.md
+      - Quickstart: features/image-annotation/quickstart.md
+      - Engine: features/image-annotation/engine.md
+      - Features: features/image-annotation/features.md
+      - Integration: features/image-annotation/integration.md
+    - Policy Engine:
+      - Overview: features/policy-engine/overview.md
+      - Doctrine & Ledger: features/policy-engine/doctrine-ledger.md
+      - MPC & Control: features/policy-engine/mpc-control.md
+      - Monitoring & Drift Detection: features/policy-engine/monitoring.md
+    - Hybrid Agent:
+      - Overview: features/hybrid-agent/overview.md
+      - Core Components: features/hybrid-agent/core-components.md
+      - Advanced Components: features/hybrid-agent/advanced-components.md
+    - Causal Reasoning:
+      - Overview: features/causal-reasoning/overview.md
+      - Structural Models: features/causal-reasoning/structural-models.md
+      - Do-Calculus: features/causal-reasoning/do-calculus.md
+      - Counterfactuals: features/causal-reasoning/counterfactuals.md
+      - Advanced Topics: features/causal-reasoning/advanced-topics.md
+  - Examples:
+    - Overview: examples/overview.md
+    - Basic Usage: examples/basic-usage.md
+    - General Agent: examples/general-agent/general-agent-examples.md
+    - Hybrid Agent: examples/hybrid-agent/hybrid-agent-examples.md
+    - Image Annotation: examples/image-annotation/image-annotation-examples.md
+    - Trading: examples/trading/trading-examples.md
+    - Integration: examples/integration/integration-examples.md
+  - Architecture:
+    - Overview: architecture/overview.md
+    - Design Principles: architecture/design-principles.md
+    - Data Flow: architecture/data-flow.md
+    - Modular Structure: architecture/modular-structure.md
+    - Hybrid Agent:
+      - Overview: architecture/hybrid-agent/overview.md
+      - Components: architecture/hybrid-agent/components.md
+      - Consistency: architecture/hybrid-agent/consistency.md
+      - Reasoning: architecture/hybrid-agent/reasoning.md
+    - Causal Graphs: architecture/causal-graphs.md
+    - LLM Integration: architecture/llm-integration.md
+    - Policy Engine: architecture/policy-engine-arch.md
+  - API Reference:
+    - CRCAAgent:
+      - Overview: api/crca/overview.md
+      - Agent & Methods: api/crca/agent-methods.md
+      - Operations: api/crca/operations.md
+    - Utils:
+      - Overview: api/utils/overview.md
+      - Router: api/utils/router.md
+      - Conversation: api/utils/conversation.md
+      - Graph Reasoner: api/utils/graph-reasoner.md
+      - Utilities: api/utils/utilities.md
+    - Schemas:
+      - Overview: api/schemas/overview.md
+      - Annotation: api/schemas/annotation.md
+      - Core Schemas: api/schemas/core-schemas.md
+      - Policy: api/schemas/policy.md
+    - Branches:
+      - Overview: api/branches/overview.md
+      - CRCA-Q: api/branches/crca-q.md
+      - CRCA-SD: api/branches/crca-sd.md
+      - CRCA-CG: api/branches/crca-cg.md
+      - General Agent: api/branches/general-agent.md
+    - Image Annotation:
+      - Overview: api/image-annotation/overview.md
+      - Engine: api/image-annotation/engine.md
+  - Changelog: changelog/index.md
+  - Contributing: contributing/overview.md

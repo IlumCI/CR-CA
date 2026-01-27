@@ -1192,4 +1192,82 @@ class Conversation:
         except Exception as e:
             logger.error(f"Dynamic auto chunking failed: {e}")
             return self._return_history_as_string_worker()
+    
+    def get_conversation_stats(self) -> Dict[str, Any]:
+        """Get statistics about the conversation.
+        
+        Returns:
+            Dictionary with conversation statistics
+        """
+        stats = {
+            "total_messages": len(self.conversation_history),
+            "total_tokens": 0,
+            "messages_by_role": {},
+            "created_at": getattr(self, "created_at", None),
+            "last_updated": None,
+        }
+        
+        # Count messages by role
+        for message in self.conversation_history:
+            role = message.get("role", "unknown")
+            stats["messages_by_role"][role] = stats["messages_by_role"].get(role, 0) + 1
+            
+            # Sum token counts if available
+            if "token_count" in message:
+                stats["total_tokens"] += message["token_count"]
+            
+            # Get last updated timestamp
+            if "timestamp" in message:
+                stats["last_updated"] = message["timestamp"]
+        
+        return stats
+    
+    def get_enhanced_metadata(self) -> Dict[str, Any]:
+        """Get enhanced metadata about the conversation.
+        
+        Returns:
+            Dictionary with enhanced metadata
+        """
+        metadata = {
+            "id": self.id,
+            "name": self.name,
+            "created_at": getattr(self, "created_at", None),
+            "context_length": self.context_length,
+            "export_method": self.export_method,
+            "save_filepath": self.save_filepath,
+            "stats": self.get_conversation_stats(),
+        }
+        
+        return metadata
+    
+    def save_with_metadata(self, filepath: Optional[str] = None, force: bool = True) -> None:
+        """Save conversation with enhanced metadata.
+        
+        Args:
+            filepath: Optional filepath to save to (uses default if None)
+            force: If True, saves regardless of autosave setting
+        """
+        if filepath:
+            self.save_filepath = filepath
+        
+        # Prepare data with metadata
+        data = {
+            "metadata": self.get_enhanced_metadata(),
+            "history": self.conversation_history,
+        }
+        
+        try:
+            self._ensure_save_path()
+            
+            if self.export_method == "json":
+                with open(self.save_filepath, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=4, default=str)
+            else:
+                with open(self.save_filepath, "w", encoding="utf-8") as f:
+                    yaml.dump(data, f, indent=4, default_flow_style=False, sort_keys=False)
+            
+            logger.info(f"Conversation with metadata saved to {self.save_filepath}")
+        except Exception as e:
+            logger.error(f"Failed to save conversation with metadata: {str(e)}\n{traceback.format_exc()}")
+            raise
 

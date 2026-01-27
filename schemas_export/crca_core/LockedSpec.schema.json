@@ -1,0 +1,646 @@
+{
+  "$defs": {
+    "AssumptionItem": {
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/AssumptionStatus",
+          "default": "unknown"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "AssumptionItem",
+      "type": "object"
+    },
+    "AssumptionSpec": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/AssumptionItem"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "falsification_plan": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Falsification Plan",
+          "type": "array"
+        }
+      },
+      "title": "AssumptionSpec",
+      "type": "object"
+    },
+    "AssumptionStatus": {
+      "enum": [
+        "declared",
+        "contested",
+        "violated",
+        "unknown"
+      ],
+      "title": "AssumptionStatus",
+      "type": "string"
+    },
+    "CausalGraphSpec": {
+      "properties": {
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/NodeSpec"
+          },
+          "title": "Nodes",
+          "type": "array"
+        },
+        "edges": {
+          "items": {
+            "$ref": "#/$defs/EdgeSpec"
+          },
+          "title": "Edges",
+          "type": "array"
+        },
+        "latent_confounders": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Latent Confounders",
+          "type": "array"
+        },
+        "notes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Notes"
+        }
+      },
+      "title": "CausalGraphSpec",
+      "type": "object"
+    },
+    "DataColumnSpec": {
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "dtype": {
+          "minLength": 1,
+          "title": "Dtype",
+          "type": "string"
+        },
+        "allowed_range": {
+          "anyOf": [
+            {
+              "maxItems": 2,
+              "minItems": 2,
+              "prefixItems": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "number"
+                }
+              ],
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Allowed Range"
+        },
+        "missingness_expected": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Missingness Expected"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        }
+      },
+      "required": [
+        "name",
+        "dtype"
+      ],
+      "title": "DataColumnSpec",
+      "type": "object"
+    },
+    "DataSpec": {
+      "properties": {
+        "dataset_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataset Name"
+        },
+        "dataset_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataset Hash"
+        },
+        "columns": {
+          "items": {
+            "$ref": "#/$defs/DataColumnSpec"
+          },
+          "title": "Columns",
+          "type": "array"
+        },
+        "time_index": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimeIndexSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "entity_index": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntityIndexSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "measurement_error_notes": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Measurement Error Notes"
+        },
+        "proxy_variables": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Proxy Variables",
+          "type": "object"
+        }
+      },
+      "title": "DataSpec",
+      "type": "object"
+    },
+    "EdgeSpec": {
+      "properties": {
+        "source": {
+          "minLength": 1,
+          "title": "Source",
+          "type": "string"
+        },
+        "target": {
+          "minLength": 1,
+          "title": "Target",
+          "type": "string"
+        },
+        "lag": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lag"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        }
+      },
+      "required": [
+        "source",
+        "target"
+      ],
+      "title": "EdgeSpec",
+      "type": "object"
+    },
+    "EntityIndexSpec": {
+      "properties": {
+        "entity_id_column": {
+          "minLength": 1,
+          "title": "Entity Id Column",
+          "type": "string"
+        },
+        "time_column": {
+          "minLength": 1,
+          "title": "Time Column",
+          "type": "string"
+        }
+      },
+      "required": [
+        "entity_id_column",
+        "time_column"
+      ],
+      "title": "EntityIndexSpec",
+      "type": "object"
+    },
+    "NodeSpec": {
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "observed": {
+          "default": true,
+          "title": "Observed",
+          "type": "boolean"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "NodeSpec",
+      "type": "object"
+    },
+    "NoiseSpec": {
+      "properties": {
+        "distribution": {
+          "const": "gaussian",
+          "default": "gaussian",
+          "title": "Distribution",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        }
+      },
+      "title": "NoiseSpec",
+      "type": "object"
+    },
+    "RoleSpec": {
+      "properties": {
+        "treatments": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Treatments",
+          "type": "array"
+        },
+        "outcomes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Outcomes",
+          "type": "array"
+        },
+        "mediators": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Mediators",
+          "type": "array"
+        },
+        "instruments": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Instruments",
+          "type": "array"
+        },
+        "adjustment_candidates": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Adjustment Candidates",
+          "type": "array"
+        },
+        "prohibited_controls": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Prohibited Controls",
+          "type": "array"
+        }
+      },
+      "title": "RoleSpec",
+      "type": "object"
+    },
+    "SCMSpec": {
+      "description": "Explicit SCM required for counterfactuals.",
+      "properties": {
+        "scm_type": {
+          "const": "linear_gaussian",
+          "default": "linear_gaussian",
+          "title": "Scm Type",
+          "type": "string"
+        },
+        "equations": {
+          "items": {
+            "$ref": "#/$defs/StructuralEquationSpec"
+          },
+          "title": "Equations",
+          "type": "array"
+        },
+        "noise_cov": {
+          "anyOf": [
+            {
+              "items": {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Noise Cov"
+        },
+        "intervention_semantics": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Intervention Semantics",
+          "type": "object"
+        }
+      },
+      "title": "SCMSpec",
+      "type": "object"
+    },
+    "SpecStatus": {
+      "enum": [
+        "draft",
+        "locked"
+      ],
+      "title": "SpecStatus",
+      "type": "string"
+    },
+    "StructuralEquationSpec": {
+      "description": "Represents one structural equation V = f(Pa(V), U_V).\n\nv0.1: store both a human-readable formula and an executable parameterization\nfor supported SCM families.",
+      "properties": {
+        "variable": {
+          "minLength": 1,
+          "title": "Variable",
+          "type": "string"
+        },
+        "parents": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Parents",
+          "type": "array"
+        },
+        "form": {
+          "const": "linear_gaussian",
+          "default": "linear_gaussian",
+          "title": "Form",
+          "type": "string"
+        },
+        "coefficients": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Coefficients",
+          "type": "object"
+        },
+        "intercept": {
+          "default": 0.0,
+          "title": "Intercept",
+          "type": "number"
+        },
+        "noise": {
+          "$ref": "#/$defs/NoiseSpec"
+        }
+      },
+      "required": [
+        "variable"
+      ],
+      "title": "StructuralEquationSpec",
+      "type": "object"
+    },
+    "TimeIndexSpec": {
+      "properties": {
+        "column": {
+          "minLength": 1,
+          "title": "Column",
+          "type": "string"
+        },
+        "frequency": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Frequency"
+        },
+        "timezone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timezone"
+        },
+        "irregular_sampling_policy": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Irregular Sampling Policy"
+        }
+      },
+      "required": [
+        "column"
+      ],
+      "title": "TimeIndexSpec",
+      "type": "object"
+    }
+  },
+  "description": "Locked spec (authoritative for identification/estimation/simulation semantics).",
+  "properties": {
+    "status": {
+      "$ref": "#/$defs/SpecStatus",
+      "default": "locked"
+    },
+    "spec_hash": {
+      "title": "Spec Hash",
+      "type": "string"
+    },
+    "approvals": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Approvals",
+      "type": "array"
+    },
+    "locked_at_utc": {
+      "title": "Locked At Utc",
+      "type": "string"
+    },
+    "data": {
+      "$ref": "#/$defs/DataSpec"
+    },
+    "graph": {
+      "$ref": "#/$defs/CausalGraphSpec"
+    },
+    "roles": {
+      "$ref": "#/$defs/RoleSpec"
+    },
+    "assumptions": {
+      "$ref": "#/$defs/AssumptionSpec"
+    },
+    "scm": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SCMSpec"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "spec_hash",
+    "locked_at_utc",
+    "data",
+    "graph",
+    "roles",
+    "assumptions"
+  ],
+  "title": "LockedSpec",
+  "type": "object"
+}

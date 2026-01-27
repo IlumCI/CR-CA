@@ -470,5 +470,38 @@ class Formatter:
                 logger.info(f"  - {step.get('step_id')} ({step.get('priority')}): {step.get('description')}")
 
 
+    def format_markdown_streaming(self, content: str, chunk_size: int = 10) -> str:
+        """Format content for streaming markdown output.
+        
+        Args:
+            content: Content to format
+            chunk_size: Size of chunks for streaming
+            
+        Returns:
+            Formatted markdown content
+        """
+        if not content:
+            return ""
+        
+        # Clean and format for streaming
+        cleaned = self.markdown_handler._clean_output(content) if self.markdown_handler else content
+        return cleaned
+    
+    def create_custom_formatter(self, style: str = "blue", border_style: str = "blue") -> Callable:
+        """Create a custom formatter function with specific styling.
+        
+        Args:
+            style: Text style
+            border_style: Border style
+            
+        Returns:
+            Custom formatter function
+        """
+        def custom_format(content: str, title: str = "") -> None:
+            self.print_panel(content, title, border_style)
+        
+        return custom_format
+
+
 # Global formatter instance with markdown disabled by default
 formatter = Formatter(md=False)
