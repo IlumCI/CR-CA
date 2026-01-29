@@ -785,6 +785,10 @@ class CRCAAgent(Agent):
             **kwargs: Additional arguments passed to parent Agent class
         """
         
+        env_model = os.getenv("CRCA_MOE_MODEL") or os.getenv("CRCA_LLM_MODEL")
+        if env_model and model_name == "gpt-4o":
+            model_name = env_model
+
         cr_ca_schema = CRCAAgent._get_cr_ca_schema()
         extract_variables_schema = CRCAAgent._get_extract_variables_schema()
         
