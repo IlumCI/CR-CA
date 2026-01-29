@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -98,6 +99,11 @@ class LLMOrchestrator:
     client: Optional[OpenAIClient] = None
     default_model: str = "gpt-4o-mini"
     enable_audit_log: bool = True
+
+    def __post_init__(self) -> None:
+        env_model = os.getenv("CRCA_MOE_MODEL") or os.getenv("CRCA_LLM_MODEL")
+        if env_model:
+            self.default_model = env_model
 
     def _draft_with_llm(self, user_text: str, observed_columns: Optional[Sequence[str]]) -> DraftBundle:
         client = self.client or OpenAIClient.from_env()

@@ -5,41 +5,28 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
 
 import torch
 
 # Disable DeepSpeed op building if CUDA_HOME not set (prevents MissingCUDAException)
-# Also handle ROCm (AMD GPUs like MI300X) - DeepSpeed supports ROCm 6.0+
 if "CUDA_HOME" not in os.environ and "DS_BUILD_OPS" not in os.environ:
     os.environ["DS_BUILD_OPS"] = "0"
 
+MODEL_REGISTRY: Dict[str, Dict[str, object]] = {
+    "google/switch-base-8": {"arch": "seq2seq", "moe": True},
+    "google/switch-large-16": {"arch": "seq2seq", "moe": True},
+}
 
-def _is_rocm() -> bool:
-    """
-    Detect if running on ROCm (AMD GPU) platform.
-    
-    Returns:
-        bool: True if running on ROCm, False otherwise.
-    """
-    # Check if PyTorch was compiled with ROCm support
-    if hasattr(torch.version, "hip") and torch.version.hip is not None:
-        return True
-    # Check for ROCm environment variables
-    if "ROCM_PATH" in os.environ or "HIP_PATH" in os.environ:
-        return True
-    # Check if device backend is ROCm
-    # Note: ROCm devices may report as "cuda" for compatibility
-    try:
-        if torch.cuda.is_available():
-            device_name = torch.cuda.get_device_name(0)
-            # MI300X and other AMD GPUs are typically identifiable
-            if "MI" in device_name or "AMD" in device_name.upper():
-                return True
-    except (RuntimeError, AttributeError, IndexError):
-        # GPU not available or error accessing device
-        pass
-    return False
+
+def _resolve_model_info(base_model: str) -> Dict[str, object]:
+    model = base_model.lower()
+    for model_id, info in MODEL_REGISTRY.items():
+        if model == model_id.lower() or model.startswith(model_id.lower()):
+            return {"arch": info.get("arch", "causal"), "moe": info.get("moe", False)}
+    if "switch" in model:
+        return {"arch": "seq2seq", "moe": True}
+    return {"arch": "causal", "moe": False}
 
 
 @dataclass
@@ -71,7 +58,7 @@ def full_finetune_qwen25_1_5b_config() -> FinetuneConfig:
     - DeepSpeed ZeRO-2 for memory efficiency
     - 20 epochs for thorough convergence
     
-    Compatible with both CUDA (NVIDIA) and ROCm (AMD MI300X) GPUs.
+    Compatible with NVIDIA GPUs (e.g. H100 SXM).
     """
     return FinetuneConfig(
         base_model="Qwen/Qwen2.5-1.5B-Instruct",
@@ -102,8 +89,7 @@ def full_finetune_qwen25_7b_config() -> FinetuneConfig:
     - DeepSpeed ZeRO-3 with CPU offload for memory efficiency
     - BF16 for better numerical stability on larger models
     
-    Compatible with both CUDA (NVIDIA) and ROCm (AMD MI300X) GPUs.
-    BF16 works excellently on MI300X GPUs.
+    Compatible with NVIDIA GPUs (e.g. H100 SXM).
     """
     return FinetuneConfig(
         base_model="Qwen/Qwen2.5-7B-Instruct",
@@ -135,8 +121,7 @@ def full_finetune_qwen25_14b_config() -> FinetuneConfig:
     - BF16 required for numerical stability
     - Longer gradient accumulation for effective batch size
     
-    Compatible with both CUDA (NVIDIA) and ROCm (AMD MI300X) GPUs.
-    MI300X's 192GB VRAM is ideal for 14B model training with BF16.
+    Compatible with NVIDIA GPUs (e.g. H100 SXM).
     """
     return FinetuneConfig(
         base_model="Qwen/Qwen2.5-14B-Instruct",
@@ -153,6 +138,59 @@ def full_finetune_qwen25_14b_config() -> FinetuneConfig:
         fp16=False,
         bf16=True,  # Required for numerical stability on large models
         deepspeed_config="training/deepspeed_zero3_14b.json",
+    )
+
+
+def full_finetune_switch_base_8_config() -> FinetuneConfig:
+    """
+    Full finetune configuration for Switch MoE base (Seq2Seq).
+
+    Optimized for Switch MoE (encoder-decoder):
+    - BF16 for H100 stability
+    - ZeRO-3 without CPU offload (H100-class GPUs)
+    - Moderate batch sizes for Seq2Seq memory footprint
+    """
+    return FinetuneConfig(
+        base_model="google/switch-base-8",
+        output_dir="lrm_switch_base_8_full_finetune",
+        train_file="training_data/react_train.jsonl",
+        eval_file=None,
+        num_train_epochs=10,
+        per_device_batch_size=4,
+        gradient_accumulation_steps=16,
+        learning_rate=2e-4,
+        use_lora=False,
+        max_seq_length=1024,
+        gradient_checkpointing=True,
+        fp16=False,
+        bf16=True,
+        deepspeed_config="training/deepspeed_zero3_h100_3gpu.json",
+    )
+
+
+def full_finetune_switch_large_16_config() -> FinetuneConfig:
+    """
+    Full finetune configuration for Switch MoE large (Seq2Seq).
+
+    - BF16 for numerical stability
+    - ZeRO-3 without CPU offload (H100-class GPUs)
+    - Conservative batch sizes to keep memory stable
+    """
+    return FinetuneConfig(
+        base_model="google/switch-large-16",
+        output_dir="lrm_switch_large_16_full_finetune",
+        train_file="training_data/react_train.jsonl",
+        eval_file=None,
+        num_train_epochs=10,
+        per_device_batch_size=2,
+        gradient_accumulation_steps=32,
+        learning_rate=1e-4,
+        use_lora=False,
+        max_seq_length=1024,
+        gradient_checkpointing=True,
+        fp16=False,
+        bf16=True,
+        deepspeed_config="training/deepspeed_zero3_h100_3gpu.json",
     )
 
 
@@ -213,24 +251,14 @@ def full_finetune_qwen25_0_5b_config() -> FinetuneConfig:
 
 def run_finetune(cfg: FinetuneConfig) -> None:
     """
-    Run finetuning with full ROCm/MI300X support.
+    Run finetuning on NVIDIA GPUs (e.g. H100 SXM).
     
-    Supports both CUDA (NVIDIA) and ROCm (AMD) GPUs:
-    - CUDA: Full support including 4-bit quantization
-    - ROCm: Full finetune with BF16/FP16 (4-bit quantization not supported, uses 8-bit or full precision)
-    - DeepSpeed: Works on both platforms (ROCm 6.0+ required for AMD)
+    Uses CUDA with NCCL for distributed training. Supports 4-bit/8-bit quantization
+    for LoRA and full finetune with BF16/FP16. DeepSpeed ZeRO-2/ZeRO-3 for multi-GPU.
     """
-    is_rocm = _is_rocm()
-    
-    # Log platform detection
-    if is_rocm:
-        print("ROCm (AMD GPU) detected - using ROCm-optimized settings")
-        print("Note: 4-bit quantization not available on ROCm, using 8-bit or full precision")
-    else:
-        print("CUDA (NVIDIA GPU) detected - using CUDA-optimized settings")
+    print("CUDA (NVIDIA GPU) detected - using CUDA settings")
     
     # Configure environment for single GPU DeepSpeed (if using DeepSpeed)
-    # DeepSpeed supports both CUDA and ROCm (ROCm 6.0+)
     if cfg.deepspeed_config:
         if "RANK" not in os.environ:
             os.environ["RANK"] = "0"
@@ -247,8 +275,9 @@ def run_finetune(cfg: FinetuneConfig) -> None:
         from datasets import load_dataset  # type: ignore
         from transformers import (
             AutoModelForCausalLM,
+            AutoModelForSeq2SeqLM,
             AutoTokenizer,
-            DataCollatorForLanguageModeling,
+            DataCollatorForSeq2Seq,
             Trainer,
             TrainingArguments,
         )  # type: ignore
@@ -256,6 +285,11 @@ def run_finetune(cfg: FinetuneConfig) -> None:
         raise RuntimeError(
             "Missing training dependencies. Install: transformers, datasets, accelerate, peft"
         ) from exc
+
+    model_info = _resolve_model_info(cfg.base_model)
+    is_seq2seq = model_info.get("arch") == "seq2seq"
+    if model_info.get("moe"):
+        print("MoE model detected - using Seq2Seq pipeline")
 
     # Load tokenizer with error handling
     try:
@@ -268,74 +302,45 @@ def run_finetune(cfg: FinetuneConfig) -> None:
         if tokenizer.pad_token is None:
             raise ValueError(f"Tokenizer from {cfg.base_model} has no pad_token or eos_token")
     
-    # Load model with platform-aware quantization
-    # ROCm (AMD GPUs like MI300X): 4-bit quantization not supported, use 8-bit or full precision
-    # CUDA (NVIDIA GPUs): Full support including 4-bit quantization
+    model_cls = AutoModelForSeq2SeqLM if is_seq2seq else AutoModelForCausalLM
+
+    # Load model (CUDA: 4-bit/8-bit for LoRA, full precision for full finetune)
     if cfg.use_lora:
-        if is_rocm:
-            # ROCm: 4-bit quantization not supported, try 8-bit or fallback to full precision
+        try:
+            from transformers import BitsAndBytesConfig
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+            )
+            model = model_cls.from_pretrained(
+                cfg.base_model,
+                quantization_config=quantization_config,
+                device_map="auto",
+            )
+            print("Using 4-bit quantization (CUDA)")
+        except (ImportError, Exception):
             try:
                 from transformers import BitsAndBytesConfig
-                # ROCm supports 8-bit quantization via bitsandbytes-rocm
                 quantization_config = BitsAndBytesConfig(
-                    load_in_8bit=True,  # 8-bit supported on ROCm, 4-bit is not
+                    load_in_8bit=True,
                     bnb_8bit_compute_dtype=torch.float16,
                 )
-                model = AutoModelForCausalLM.from_pretrained(
+                model = model_cls.from_pretrained(
                     cfg.base_model,
                     quantization_config=quantization_config,
                     device_map="auto",
                 )
-                print("Using 8-bit quantization (ROCm compatible)")
-            except (ImportError, Exception) as e:
-                # Fallback: full precision if 8-bit quantization not available
-                print(f"8-bit quantization not available on ROCm: {e}")
-                print("Falling back to full precision (FP16/BF16)")
-                model = AutoModelForCausalLM.from_pretrained(
+                print("Using 8-bit quantization (4-bit not available)")
+            except (ImportError, Exception):
+                model = model_cls.from_pretrained(
                     cfg.base_model,
                     torch_dtype=torch.bfloat16 if cfg.bf16 else torch.float16,
                     low_cpu_mem_usage=True,
                 )
-        else:
-            # CUDA: Try 4-bit first, fallback to 8-bit or full precision
-            try:
-                from transformers import BitsAndBytesConfig
-                quantization_config = BitsAndBytesConfig(
-                    load_in_4bit=True,  # 4-bit uses less memory than 8-bit
-                    bnb_4bit_compute_dtype=torch.float16,
-                )
-                model = AutoModelForCausalLM.from_pretrained(
-                    cfg.base_model,
-                    quantization_config=quantization_config,
-                    device_map="auto",
-                )
-                print("Using 4-bit quantization (CUDA)")
-            except (ImportError, Exception):
-                # Fallback: try 8-bit or full precision
-                try:
-                    from transformers import BitsAndBytesConfig
-                    quantization_config = BitsAndBytesConfig(
-                        load_in_8bit=True,
-                        bnb_8bit_compute_dtype=torch.float16,
-                    )
-                    model = AutoModelForCausalLM.from_pretrained(
-                        cfg.base_model,
-                        quantization_config=quantization_config,
-                        device_map="auto",
-                    )
-                    print("Using 8-bit quantization (4-bit not available)")
-                except (ImportError, Exception):
-                    # Final fallback: regular fp16/bf16
-                    model = AutoModelForCausalLM.from_pretrained(
-                        cfg.base_model,
-                        torch_dtype=torch.bfloat16 if cfg.bf16 else torch.float16,
-                        low_cpu_mem_usage=True,
-                    )
-                    print("Using full precision (quantization not available)")
+                print("Using full precision (quantization not available)")
     else:
         # Full finetune: use BF16/FP16 based on config
-        # Works on both CUDA and ROCm
-        model = AutoModelForCausalLM.from_pretrained(
+        model = model_cls.from_pretrained(
             cfg.base_model,
             torch_dtype=torch.bfloat16 if cfg.bf16 else torch.float16,
             low_cpu_mem_usage=True,
@@ -375,7 +380,29 @@ def run_finetune(cfg: FinetuneConfig) -> None:
         raise ValueError("Training dataset is empty")
 
     def _tokenize(examples):
-        """Tokenize the examples, combining prompt and response."""
+        if is_seq2seq:
+            inputs = tokenizer(
+                examples["prompt"],
+                truncation=True,
+                padding="max_length",
+                max_length=cfg.max_seq_length,
+                return_tensors=None,
+            )
+            targets = tokenizer(
+                text_target=examples["response"],
+                truncation=True,
+                padding="max_length",
+                max_length=cfg.max_seq_length,
+                return_tensors=None,
+            )
+            pad_token_id = tokenizer.pad_token_id
+            labels = [
+                [token_id if token_id != pad_token_id else -100 for token_id in seq]
+                for seq in targets["input_ids"]
+            ]
+            inputs["labels"] = labels
+            return inputs
+
         texts = [p + "\n" + r for p, r in zip(examples["prompt"], examples["response"])]
         tokenized = tokenizer(
             texts,
@@ -439,7 +466,7 @@ def run_finetune(cfg: FinetuneConfig) -> None:
         eval_steps=200 if cfg.eval_file else None,  # Evaluate every 200 steps if eval_file provided
         save_total_limit=2,
         remove_unused_columns=False,
-        dataloader_pin_memory=False,  # Save memory, also helps with ROCm compatibility
+        dataloader_pin_memory=False,  # Save memory
         dataloader_num_workers=0,  # Reduce memory overhead
         optim="adamw_torch",  # Use standard AdamW (more memory efficient than fused variants)
         max_grad_norm=1.0,  # Gradient clipping
@@ -453,13 +480,21 @@ def run_finetune(cfg: FinetuneConfig) -> None:
     if len(train_dataset) == 0:
         raise ValueError("Tokenized training dataset is empty")
     
+    data_collator = None
+    if is_seq2seq:
+        data_collator = DataCollatorForSeq2Seq(
+            tokenizer=tokenizer,
+            model=model,
+            label_pad_token_id=-100,
+        )
+
     # Data collator is optional when using max_length padding, but helps ensure consistency
     trainer = Trainer(
         model=model,
         args=args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        # data_collator not needed when padding to max_length, but can help with label handling
+        data_collator=data_collator,
     )
     
     print(f"Starting training with {len(train_dataset)} examples")
